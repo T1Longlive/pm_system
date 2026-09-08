@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  项目管理系统 Maven 构建配置
+  用法：mvn -s d:\IDEA_Project\pm-system\settings.xml <goal>
+  作用：将中央仓库请求镜像到阿里云公共仓库，避免直连 repo.maven.apache.org 的网络问题
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+
+    <!-- 本地仓库默认使用 ~/.m2/repository，如需项目级隔离可取消注释 -->
+    <!-- <localRepository>d:/IDEA_Project/pm-system/.tools/m2-repository</localRepository> -->
+
+    <mirrors>
+        <!-- 阿里云公共仓库（聚合 central + jcenter），镜像中央仓库 -->
+        <mirror>
+            <id>aliyun-public</id>
+            <mirrorOf>central</mirrorOf>
+            <name>阿里云公共仓库</name>
+            <url>https://maven.aliyun.com/repository/public</url>
+        </mirror>
+    </mirrors>
+</settings>

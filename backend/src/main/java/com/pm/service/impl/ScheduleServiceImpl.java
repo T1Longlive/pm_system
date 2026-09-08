@@ -1,0 +1,816 @@
+package com.pm.service.impl;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.pm.common.BizException;
+import com.pm.common.CraftConstants;
+import com.pm.common.NotifyTypes;
+import com.pm.dto.ScheduleMonthCreateDTO;
+import com.pm.dto.ScheduleRequirementDTO;
+import com.pm.dto.ScheduleRowSaveDTO;
+import com.pm.entity.BizOperationLog;
+import com.pm.entity.CalendarDay;
+import com.pm.entity.Project;
+import com.pm.entity.Requirement;
+import com.pm.entity.RequirementParticipant;
+import com.pm.entity.ScheduleCell;
+import com.pm.entity.ScheduleMonth;
+import com.pm.entity.ScheduleRow;
+import com.pm.entity.User;
+import com.pm.mapper.BizOperationLogMapper;
+import com.pm.mapper.ProjectMapper;
+import com.pm.mapper.RequirementMapper;
+import com.pm.mapper.RequirementParticipantMapper;
+import com.pm.mapper.ScheduleCellMapper;
+import com.pm.mapper.ScheduleMonthMapper;
+import com.pm.mapper.ScheduleRowMapper;
+import com.pm.mapper.UserMapper;
+import com.pm.service.CalendarService;
+import com.pm.service.NotificationService;
+import com.pm.service.ScheduleService;
+import com.pm.vo.CalendarDayVO;
+import com.pm.vo.CopyRowResultVO;
+import com.pm.vo.ScheduleMonthVO;
+import com.pm.vo.ScheduleRowSaveResultVO;
+import com.pm.vo.ScheduleViewVO;
+import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.YearMonth;
+import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+/**
+ * 排期管理服务实现
+ * 核心规则：
+ * 1. 排期行生成：PM 从需求池选 PENDING 需求，按需求参与人生成行（每行 工种×负责人 唯一），
+ *    seq=当月该表已有需求数+1；同一需求同月只生成一次
+ * 2. 保存校验：VOID 行拒绝编辑（非 VOID 行随时可编辑）；乐观锁（updatedAt 毫秒比对）；
+ *    格子日期必须属于所在月且为可排班日（WORKDAY/ADJUSTED）；单格 0<v≤1 且为 0.1 的整数倍；
+ *    同人同日跨需求合计≤1
+ * 3. 跨月：plannedEffort 非空 且 当月格子合计<plannedEffort 且 当月剩余可填工作日数为 0 时，
+ *    自动创建下月表并追加 is_overflow=1 的顺延行；PM 也可手动"添加到下月"（复制行，带原工期）
+ * 4. 行状态：仅 TODO/VOID 落库；已排/排期中/未排期三态由前端按 工期 vs 已排合计 派生
+ * 5. 需求状态推进（全部日期驱动）：全部非 VOID 行排满 → PENDING→READY（保存时触发，通知）；
+ *    任一行格子日≤今天 → READY→DEV；全部非 QA 行格子日<今天 → DEV→TEST（通知）；
+ *    全部行格子日<今天 → TEST→ARCHIVING（通知）；ARCHIVING→ARCHIVED 由需求详情 PM 手动归档
+ */
+@Service
+@RequiredArgsConstructor
+public class ScheduleServiceImpl implements ScheduleService {
+
+    /** 排期行状态：待开始 */
+    private static final String ROW_TODO = "TODO";
+    /** 排期行状态：作废（参与人移除） */
+    private static final String ROW_VOID = "VOID";
+
+    /** 需求状态：待排期 */
+    private static final String REQ_PENDING = "PENDING";
+    /** 需求状态：已排期 */
+    private static final String REQ_READY = "READY";
+    /** 需求状态：开发中 */
+    private static final String REQ_DEV = "DEV";
+    /** 需求状态：测试中 */
+    private static final String REQ_TEST = "TEST";
+    /** 需求状态：待归档 */
+    private static final String REQ_ARCHIVING = "ARCHIVING";
+
+    /** 日历类型：工作日（可排班） */
+    private static final String TYPE_WORKDAY = "WORKDAY";
+    /** 日历类型：调休上班（可排班） */
+    private static final String TYPE_ADJUSTED = "ADJUSTED";
+
+    /** 测试工种（需求状态 DEV→TEST 推进判定时排除：QA 行可与开发并行） */
+    private static final String CRAFT_QA = CraftConstants.QA;
+
+    /** 计划工期上限（对应 schedule_row.planned_effort DECIMAL(5,2)） */
+    private static final BigDecimal EFFORT_MAX = new BigDecimal("999.99");
+    /** 单格 0.1 步进校验的浮点容忍度（v×10 后与整数比对，等价于原值容忍 1e-9） */
+    private static final BigDecimal STEP_TOLERANCE = new BigDecimal("0.00000001");
+
+    /** 留痕/通知使用的业务类型 */
+    private static final String BIZ_TYPE = "REQUIREMENT";
+
+    private final ScheduleMonthMapper scheduleMonthMapper;
+    private final ScheduleRowMapper scheduleRowMapper;
+    private final ScheduleCellMapper scheduleCellMapper;
+    private final RequirementMapper requirementMapper;
+    private final RequirementParticipantMapper participantMapper;
+    private final ProjectMapper projectMapper;
+    private final UserMapper userMapper;
+    private final BizOperationLogMapper operationLogMapper;
+    private final NotificationService notificationService;
+    private final CalendarService calendarService;
+
+    // ==================== 月度排期表 ====================
+
+    @Override
+    public List<ScheduleMonthVO> listMonths() {
+        return scheduleMonthMapper.selectList(new LambdaQueryWrapper<ScheduleMonth>()
+                        .orderByAsc(ScheduleMonth::getYear)
+                        .orderByAsc(ScheduleMonth::getMonth))
+                .stream().map(this::toMonthVO).toList();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ScheduleMonthVO createMonth(Long userId, ScheduleMonthCreateDTO dto) {
+        checkMonthCreatePermission(userId);
+        Long count = scheduleMonthMapper.selectCount(new LambdaQueryWrapper<ScheduleMonth>()
+                .eq(ScheduleMonth::getYear, dto.getYear())
+                .eq(ScheduleMonth::getMonth, dto.getMonth()));
+        if (count != null && count > 0) {
+            throw new BizException(400, "该月排期表已存在");
+        }
+        ScheduleMonth month = new ScheduleMonth();
+        month.setYear(dto.getYear());
+        month.setMonth(dto.getMonth());
+        month.setCreatedBy(userId);
+        scheduleMonthMapper.insert(month);
+        return toMonthVO(month);
+    }
+
+    @Override
+    public ScheduleViewVO getMonthView(Long monthId) {
+        ScheduleMonth month = requireMonth(monthId);
+        ScheduleViewVO view = new ScheduleViewVO();
+        view.setMonth(toMonthVO(month));
+        // 整月日历（前端据此灰显周末/节假日列）
+        view.setDays(calendarService.getMonth(month.getYear(), month.getMonth()).getDays());
+
+        // 当月全部排期行（按 工种+id 升序；VOID 行也返回，前端灰显）
+        List<ScheduleRow> rows = scheduleRowMapper.selectList(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getMonthId, monthId)
+                .orderByAsc(ScheduleRow::getCraft)
+                .orderByAsc(ScheduleRow::getId));
+        if (rows.isEmpty()) {
+            view.setGroups(List.of());
+            return view;
+        }
+
+        // 批量查需求/项目/用户（需求级合并展示列全部 JOIN 派生，不冗余存储）
+        List<Long> rowIds = rows.stream().map(ScheduleRow::getId).toList();
+        Map<Long, Requirement> reqMap = requirementMapper.selectBatchIds(
+                        rows.stream().map(ScheduleRow::getRequirementId).distinct().toList())
+                .stream().collect(Collectors.toMap(Requirement::getId, r -> r));
+        Map<Long, Project> projectMap = projectMapper.selectBatchIds(
+                        reqMap.values().stream().map(Requirement::getProjectId).distinct().toList())
+                .stream().collect(Collectors.toMap(Project::getId, p -> p));
+        Set<Long> userIds = new LinkedHashSet<>();
+        reqMap.values().forEach(r -> userIds.add(r.getPlannerId()));
+        rows.forEach(r -> userIds.add(r.getUserId()));
+        Map<Long, String> nameMap = userMapper.selectBatchIds(userIds).stream()
+                .collect(Collectors.toMap(User::getId, User::getRealName));
+
+        // 批量查格子，按行分组
+        Map<Long, List<ScheduleCell>> cellsByRow = scheduleCellMapper.selectList(
+                        new LambdaQueryWrapper<ScheduleCell>().in(ScheduleCell::getRowId, rowIds))
+                .stream().collect(Collectors.groupingBy(ScheduleCell::getRowId));
+
+        // 按需求分组（保持行的 工种+id 顺序）
+        Map<Long, List<ScheduleRow>> rowsByReq = rows.stream()
+                .collect(Collectors.groupingBy(ScheduleRow::getRequirementId, LinkedHashMap::new, Collectors.toList()));
+        List<ScheduleViewVO.GroupVO> groups = new ArrayList<>();
+        for (Map.Entry<Long, List<ScheduleRow>> entry : rowsByReq.entrySet()) {
+            Requirement req = reqMap.get(entry.getKey());
+            if (req == null) {
+                continue;
+            }
+            Project project = projectMap.get(req.getProjectId());
+            ScheduleViewVO.GroupVO group = new ScheduleViewVO.GroupVO();
+            group.setSeq(entry.getValue().get(0).getSeq());
+            group.setRequirementId(req.getId());
+            group.setReqNo(req.getReqNo());
+            group.setTitle(req.getTitle());
+            group.setProjectId(req.getProjectId());
+            group.setProjectName(project == null ? null : project.getName());
+            group.setPlannerName(nameMap.get(req.getPlannerId()));
+            group.setPriority(req.getPriority());
+            group.setRows(entry.getValue().stream()
+                    .map(row -> toRowVO(row, cellsByRow.getOrDefault(row.getId(), List.of()), nameMap))
+                    .toList());
+            groups.add(group);
+        }
+        // groups 按 seq（当月表内展示序号）升序
+        groups.sort((a, b) -> {
+            int cmp = Integer.compare(a.getSeq(), b.getSeq());
+            return cmp != 0 ? cmp : Long.compare(a.getRequirementId(), b.getRequirementId());
+        });
+        view.setGroups(groups);
+        return view;
+    }
+
+    // ==================== 排期行生成 ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Integer addRequirement(Long userId, Long monthId, ScheduleRequirementDTO dto) {
+        requireMonth(monthId);
+        Requirement req = requireRequirement(dto.getRequirementId());
+        Project project = requireProject(req.getProjectId());
+        // 权限：仅该需求项目的 PM（项目创建者）
+        if (!project.getCreatorId().equals(userId)) {
+            throw new BizException(403, "无权限");
+        }
+        // 仅待排期需求可排期
+        if (!REQ_PENDING.equals(req.getStatus())) {
+            throw new BizException(400, "仅待排期需求可排期");
+        }
+        // 同一需求同月只生成一次
+        Long count = scheduleRowMapper.selectCount(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getMonthId, monthId)
+                .eq(ScheduleRow::getRequirementId, req.getId()));
+        if (count != null && count > 0) {
+            throw new BizException(400, "该需求已在当月排期表中");
+        }
+        // 按需求参与人生成行（requirement_participant 已保证 工种×负责人 唯一）
+        List<RequirementParticipant> participants = participantMapper.selectList(
+                new LambdaQueryWrapper<RequirementParticipant>()
+                        .eq(RequirementParticipant::getRequirementId, req.getId())
+                        .orderByAsc(RequirementParticipant::getId));
+        if (participants.isEmpty()) {
+            return 0;
+        }
+        // seq = 当月该表已有需求数 + 1
+        int seq = scheduleRowMapper.countRequirementsInMonth(monthId).intValue() + 1;
+        for (RequirementParticipant participant : participants) {
+            ScheduleRow row = new ScheduleRow();
+            row.setMonthId(monthId);
+            row.setRequirementId(req.getId());
+            row.setCraft(participant.getCraft());
+            row.setUserId(participant.getUserId());
+            row.setSeq(seq);
+            row.setStatus(ROW_TODO);
+            row.setIsOverflow(0);
+            scheduleRowMapper.insert(row);
+        }
+        // 需求状态保持 PENDING，首次保存格子时才转 READY
+        return participants.size();
+    }
+
+    // ==================== 排期矩阵填写 ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ScheduleRowSaveResultVO saveRow(Long userId, Long rowId, ScheduleRowSaveDTO dto) {
+        ScheduleRow row = requireRow(rowId);
+        ScheduleMonth month = requireMonth(row.getMonthId());
+        Requirement req = requireRequirement(row.getRequirementId());
+        Project project = requireProject(req.getProjectId());
+        // 权限：仅项目 PM（排期时间由 PM 统一填写）
+        if (!project.getCreatorId().equals(userId)) {
+            throw new BizException(403, "无权限");
+        }
+        // 校验1：仅 VOID 拒绝编辑（非 VOID 行随时可编辑工期与格子）
+        if (ROW_VOID.equals(row.getStatus())) {
+            throw new BizException(400, "该排期行已作废，不可编辑");
+        }
+        // 校验2：乐观锁（提交 updatedAt 毫秒与库中不一致则 409）
+        Long dbVersion = toMillis(row.getUpdatedAt());
+        if (dto.getUpdatedAt() == null || !dto.getUpdatedAt().equals(dbVersion)) {
+            throw new BizException(409, "数据已被他人修改，请刷新后重试");
+        }
+        // 校验3：计划工期（可空；>0、一位小数即 0.1 步进、不超过上限——与格子 0.1 步进口径一致，避免两位小数永远排不满）
+        checkPlannedEffort(dto.getPlannedEffort());
+        // 校验4：格子日期归属月 + 可排班日 + 数值范围与 0.1 步进
+        Map<LocalDate, CalendarDay> monthDays = calendarService.getMonthDays(month.getYear(), month.getMonth());
+        Map<LocalDate, BigDecimal> newCells = checkAndNormalizeCells(dto.getCells(), month, monthDays);
+        // 校验5：已排合计不得超过计划工期（超过则拒绝，提示先修改工期）
+        if (dto.getPlannedEffort() != null) {
+            BigDecimal sum = newCells.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+            if (sum.compareTo(dto.getPlannedEffort()) > 0) {
+                throw new BizException(400, "已排工作量" + sum.stripTrailingZeros().toPlainString()
+                        + "超过计划工期" + dto.getPlannedEffort().stripTrailingZeros().toPlainString()
+                        + "，请先修改计划工期");
+            }
+        }
+        // 校验6：同人同日合计≤1（跨所有需求所有行，含其他月份同日）
+        checkUserDayTotal(row.getUserId(), newCells, rowId);
+
+        // 变更检测：格子与库中不一致才发 SCHEDULE_CHANGED 通知
+        Map<LocalDate, BigDecimal> oldCells = loadRowCells(rowId);
+        boolean cellsChanged = !cellsEquals(oldCells, newCells);
+
+        // 全量替换该行格子（空 map=清空全部格子）
+        scheduleCellMapper.delete(new LambdaQueryWrapper<ScheduleCell>().eq(ScheduleCell::getRowId, rowId));
+        for (Map.Entry<LocalDate, BigDecimal> entry : newCells.entrySet()) {
+            ScheduleCell cell = new ScheduleCell();
+            cell.setRowId(rowId);
+            cell.setDay(entry.getKey());
+            cell.setValue(entry.getValue());
+            scheduleCellMapper.insert(cell);
+        }
+
+        // 更新行：plannedEffort 全量替换（null=清空）；显式推进 updated_at 作为乐观锁版本（保证严格大于旧值）
+        LocalDateTime newVersion = nextVersionTime(row.getUpdatedAt());
+        scheduleRowMapper.update(null, new LambdaUpdateWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getId, rowId)
+                .set(ScheduleRow::getPlannedEffort, dto.getPlannedEffort())
+                .set(ScheduleRow::getUpdatedAt, newVersion));
+
+        // 跨月自动顺延检查（当月排不下剩余工期时自动建下月表并追加顺延行）
+        ScheduleRowSaveResultVO.OverflowVO overflow =
+                checkAndCreateOverflow(row, month, req, dto.getPlannedEffort(), newCells, monthDays, userId);
+
+        // 排满检查：PENDING 需求且全部非 VOID 行（跨全部月份）均已排满 → READY（已排期）
+        // 已排满定义：每行 planned_effort>0 且 该行 schedule_cell 合计 >= planned_effort（含本行刚保存的格子）
+        if (REQ_PENDING.equals(req.getStatus())) {
+            Long notFullCount = scheduleRowMapper.countNotFullRows(req.getId());
+            if (notFullCount != null && notFullCount == 0 && advanceStatus(req.getId(), REQ_PENDING, REQ_READY)) {
+                writeLog(req.getId(), userId, "SCHEDULE_SAVE",
+                        "排期保存：" + req.getReqNo() + "，全部排期行已排满，需求进入已排期");
+                notifyAllParticipants(req, "需求状态变更",
+                        "需求「" + req.getTitle() + "」已完成排期，进入已排期");
+            }
+        }
+
+        // 通知该行负责人：排期被修改（仅格子实际变化时）
+        if (cellsChanged) {
+            notificationService.send(row.getUserId(), NotifyTypes.SCHEDULE_CHANGED, "排期已修改",
+                    "需求「" + req.getTitle() + "」您的排期已被项目经理修改（"
+                            + month.getYear() + "年" + month.getMonth() + "月·" + craftName(row.getCraft()) + "）",
+                    BIZ_TYPE, req.getId());
+        }
+
+        ScheduleRowSaveResultVO result = new ScheduleRowSaveResultVO();
+        result.setUpdatedAt(toMillis(newVersion));
+        result.setOverflow(overflow);
+        return result;
+    }
+
+    // ==================== 复制到下月与状态推进 ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public CopyRowResultVO copyRowToNextMonth(Long userId, Long rowId) {
+        ScheduleRow row = requireRow(rowId);
+        ScheduleMonth month = requireMonth(row.getMonthId());
+        Requirement req = requireRequirement(row.getRequirementId());
+        Project project = requireProject(req.getProjectId());
+        // 权限：仅项目 PM（与排期编辑一致）
+        if (!project.getCreatorId().equals(userId)) {
+            throw new BizException(403, "无权限");
+        }
+        // 作废行不可复制
+        if (ROW_VOID.equals(row.getStatus())) {
+            throw new BizException(400, "该排期行已作废，不可复制");
+        }
+        // 下月表不存在则自动创建（跨年自动进位）
+        ScheduleMonth nextMonth = resolveOrCreateNextMonth(month, userId);
+        // 幂等：下月已存在同（需求,工种,负责人）行则不重复插入
+        Long existCount = scheduleRowMapper.selectCount(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getMonthId, nextMonth.getId())
+                .eq(ScheduleRow::getRequirementId, row.getRequirementId())
+                .eq(ScheduleRow::getCraft, row.getCraft())
+                .eq(ScheduleRow::getUserId, row.getUserId()));
+        if (existCount != null && existCount > 0) {
+            return toCopyResult(nextMonth.getId(), false);
+        }
+        ScheduleRow copy = new ScheduleRow();
+        copy.setMonthId(nextMonth.getId());
+        copy.setRequirementId(row.getRequirementId());
+        copy.setCraft(row.getCraft());
+        copy.setUserId(row.getUserId());
+        copy.setSeq(resolveNextMonthSeq(nextMonth, row.getRequirementId()));
+        // 工期带原值（非剩余），下月继续填格子
+        copy.setPlannedEffort(row.getPlannedEffort());
+        copy.setStatus(ROW_TODO);
+        copy.setIsOverflow(0);
+        try {
+            scheduleRowMapper.insert(copy);
+        } catch (DuplicateKeyException e) {
+            // uk_month_req_craft_user 并发兜底：已存在同键行视为未新插入
+            return toCopyResult(nextMonth.getId(), false);
+        }
+        // 操作留痕
+        writeLog(req.getId(), userId, "SCHEDULE_COPY",
+                "复制排期行至" + nextMonth.getYear() + "年" + nextMonth.getMonth() + "月："
+                        + req.getTitle() + "·" + craftName(row.getCraft()) + "·" + userName(row.getUserId()));
+        return toCopyResult(nextMonth.getId(), true);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int advanceBySchedule() {
+        int advanced = 0;
+        LocalDate today = LocalDate.now();
+        // 1) READY→DEV：任一非 VOID 行（不限工种）存在格子日 ≤ 今天（不通知）
+        for (Long reqId : scheduleRowMapper.selectReadyReqIdsWithDueCell(today)) {
+            if (advanceStatus(reqId, REQ_READY, REQ_DEV)) {
+                advanced++;
+            }
+        }
+        // 2) DEV→TEST：全部非 QA 非 VOID 行的格子日 < 今天（QA 可与开发并行）
+        for (Long reqId : scheduleRowMapper.selectDevReqIdsAllPassed(today)) {
+            Requirement req = requireRequirement(reqId);
+            if (advanceStatus(reqId, REQ_DEV, REQ_TEST)) {
+                advanced++;
+                notifyAllParticipants(req, "需求状态变更",
+                        "需求「" + req.getTitle() + "」全部开发任务已排期结束，已进入测试中");
+            }
+        }
+        // 3) TEST→ARCHIVING：全部非 VOID 行（含 QA）的格子日 < 今天
+        for (Long reqId : scheduleRowMapper.selectTestReqIdsAllPassed(today)) {
+            Requirement req = requireRequirement(reqId);
+            if (advanceStatus(reqId, REQ_TEST, REQ_ARCHIVING)) {
+                advanced++;
+                notifyAllParticipants(req, "需求状态变更",
+                        "需求「" + req.getTitle() + "」全部排期已结束，已进入待归档");
+            }
+        }
+        return advanced;
+    }
+
+    // ==================== 私有校验 ====================
+
+    /**
+     * 创建月表权限：管理员 或 任意项目的项目经理（查 project 表 creator_id=当前用户，即项目创建者）
+     */
+    private void checkMonthCreatePermission(Long userId) {
+        User user = userMapper.selectById(userId);
+        if (user != null && user.getIsAdmin() != null && user.getIsAdmin() == 1) {
+            return;
+        }
+        Long createdProjects = projectMapper.selectCount(new LambdaQueryWrapper<Project>()
+                .eq(Project::getCreatorId, userId));
+        if (createdProjects == null || createdProjects == 0) {
+            throw new BizException(403, "无权限");
+        }
+    }
+
+    /**
+     * 计划工期校验：可空；>0、0.1 步进（一位小数，与格子步进口径一致，避免两位小数永远排不满）、
+     * 不超过 DECIMAL(5,2) 上限 999.99
+     */
+    private void checkPlannedEffort(BigDecimal plannedEffort) {
+        if (plannedEffort == null) {
+            return;
+        }
+        if (plannedEffort.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BizException(400, "计划工期必须大于0");
+        }
+        if (plannedEffort.scale() > 1) {
+            throw new BizException(400, "计划工期必须为0.1的整数倍");
+        }
+        if (plannedEffort.compareTo(EFFORT_MAX) > 0) {
+            throw new BizException(400, "计划工期不能超过999.99");
+        }
+    }
+
+    /**
+     * 格子校验与规范化：
+     * 1. 日期可解析（2026-09-04 格式）且属于该行所在月
+     * 2. 日期为可排班日（WORKDAY/ADJUSTED，其余 400「X日为非工作日」）
+     * 3. 单格值 0<v≤1 且为 0.1 的整数倍（BigDecimal 判断，浮点误差容忍 1e-9），规范化为一位小数落库
+     */
+    private Map<LocalDate, BigDecimal> checkAndNormalizeCells(Map<String, BigDecimal> cells, ScheduleMonth month,
+                                                              Map<LocalDate, CalendarDay> monthDays) {
+        Map<LocalDate, BigDecimal> result = new LinkedHashMap<>();
+        if (cells == null || cells.isEmpty()) {
+            return result;
+        }
+        for (Map.Entry<String, BigDecimal> entry : cells.entrySet()) {
+            LocalDate day;
+            try {
+                day = LocalDate.parse(entry.getKey());
+            } catch (DateTimeParseException e) {
+                throw new BizException(400, "日期格式错误：" + entry.getKey() + "（应为2026-09-04）");
+            }
+            if (day.getYear() != month.getYear() || day.getMonthValue() != month.getMonth()) {
+                throw new BizException(400, entry.getKey() + "不属于该行所在月份" + month.getYear() + "-" + month.getMonth());
+            }
+            String type = monthDays.get(day).getType();
+            if (!TYPE_WORKDAY.equals(type) && !TYPE_ADJUSTED.equals(type)) {
+                throw new BizException(400, entry.getKey() + "为非工作日");
+            }
+            BigDecimal value = entry.getValue();
+            if (value == null) {
+                throw new BizException(400, entry.getKey() + "工作量不能为空");
+            }
+            if (value.compareTo(BigDecimal.ZERO) <= 0 || value.compareTo(BigDecimal.ONE) > 0) {
+                throw new BizException(400, entry.getKey() + "工作量必须大于0且不超过1");
+            }
+            // 0.1 步进：v×10 与最近整数的差 ≤ 1e-8（等价于原值容忍 1e-9）
+            BigDecimal x10 = value.multiply(BigDecimal.TEN);
+            BigDecimal rounded = x10.setScale(0, RoundingMode.HALF_UP);
+            if (x10.subtract(rounded).abs().compareTo(STEP_TOLERANCE) > 0) {
+                throw new BizException(400, entry.getKey() + "工作量必须为0.1的整数倍");
+            }
+            // 规范化：按步进值落库，避免 0.30000000000000004 之类的浮点尾数
+            result.put(day, rounded.divide(BigDecimal.TEN, 1, RoundingMode.HALF_UP));
+        }
+        return result;
+    }
+
+    /**
+     * 同人同日合计≤1 校验：该负责人在该日期、除本行外全部非 VOID 行（含其他需求、其他月份同日的行，
+     * day 为绝对日期天然跨月对齐）的格子合计，加上本行新值 ≤1，否则 400「用户X在X日工作量已超过1」
+     */
+    private void checkUserDayTotal(Long rowUserId, Map<LocalDate, BigDecimal> newCells, Long rowId) {
+        for (Map.Entry<LocalDate, BigDecimal> entry : newCells.entrySet()) {
+            BigDecimal other = scheduleRowMapper.selectUserDayTotal(rowUserId, entry.getKey(), rowId);
+            BigDecimal total = entry.getValue().add(other == null ? BigDecimal.ZERO : other);
+            if (total.compareTo(BigDecimal.ONE) > 0) {
+                throw new BizException(400, "用户" + userName(rowUserId) + "在" + entry.getKey() + "工作量已超过1");
+            }
+        }
+    }
+
+    /**
+     * 跨月自动顺延检查（保存事务内）：
+     * 条件（同时满足）：plannedEffort 非空 且 该行当月格子合计 < plannedEffort 且 该行当月剩余可填工作日数为 0
+     * （当月可排班日中未被本行填值的格子数=0，即当月已排不下剩余工期）。
+     * 动作：下月排期表不存在则自动创建（created_by=当前操作人）；插入顺延行（同需求/工种/负责人，
+     * is_overflow=1，planned_effort=剩余工期，格子空白）；通知该行负责人 SCHEDULE_OVERFLOW。
+     * 幂等：下月已存在同（需求,工种,负责人）行则不重复插入。
+     */
+    private ScheduleRowSaveResultVO.OverflowVO checkAndCreateOverflow(ScheduleRow row, ScheduleMonth month, Requirement req,
+                                                                      BigDecimal plannedEffort, Map<LocalDate, BigDecimal> newCells,
+                                                                      Map<LocalDate, CalendarDay> monthDays, Long operatorId) {
+        if (plannedEffort == null) {
+            return null;
+        }
+        BigDecimal sum = newCells.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (sum.compareTo(plannedEffort) >= 0) {
+            // 已排工作量不小于计划工期，无需顺延
+            return null;
+        }
+        // 当月剩余可填工作日数（可排班日 - 本行已填格子）> 0 说明当月还排得下
+        long unfilled = monthDays.values().stream()
+                .filter(d -> TYPE_WORKDAY.equals(d.getType()) || TYPE_ADJUSTED.equals(d.getType()))
+                .map(CalendarDay::getDay)
+                .filter(day -> !newCells.containsKey(day))
+                .count();
+        if (unfilled > 0) {
+            return null;
+        }
+        // 剩余工期 = 计划工期 - 当月格子合计
+        BigDecimal carriedEffort = plannedEffort.subtract(sum).setScale(2, RoundingMode.HALF_UP);
+        // 下月（跨年自动进位），下月排期表不存在则自动创建
+        YearMonth next = YearMonth.of(month.getYear(), month.getMonth()).plusMonths(1);
+        ScheduleMonth nextMonth = resolveOrCreateNextMonth(month, operatorId);
+        // 幂等：下月已存在同（需求,工种,负责人）行则不重复插入
+        Long existCount = scheduleRowMapper.selectCount(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getMonthId, nextMonth.getId())
+                .eq(ScheduleRow::getRequirementId, req.getId())
+                .eq(ScheduleRow::getCraft, row.getCraft())
+                .eq(ScheduleRow::getUserId, row.getUserId()));
+        if (existCount != null && existCount > 0) {
+            return null;
+        }
+        // 顺延行展示序号：该需求在下月已有行则沿用其 seq，否则 = 下月已有需求数+1
+        ScheduleRow sameReqRow = scheduleRowMapper.selectOne(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getMonthId, nextMonth.getId())
+                .eq(ScheduleRow::getRequirementId, req.getId())
+                .last("LIMIT 1"));
+        int seq = sameReqRow != null ? sameReqRow.getSeq()
+                : scheduleRowMapper.countRequirementsInMonth(nextMonth.getId()).intValue() + 1;
+        ScheduleRow overflowRow = new ScheduleRow();
+        overflowRow.setMonthId(nextMonth.getId());
+        overflowRow.setRequirementId(req.getId());
+        overflowRow.setCraft(row.getCraft());
+        overflowRow.setUserId(row.getUserId());
+        overflowRow.setSeq(seq);
+        overflowRow.setPlannedEffort(carriedEffort);
+        overflowRow.setStatus(ROW_TODO);
+        overflowRow.setIsOverflow(1);
+        scheduleRowMapper.insert(overflowRow);
+
+        // 通知该行负责人（内容含需求名、剩余工期、顺延到的月份）
+        notificationService.send(row.getUserId(), NotifyTypes.SCHEDULE_OVERFLOW, "排期跨月顺延",
+                "需求「" + req.getTitle() + "」" + month.getMonth() + "月排期已满，剩余工期" + carriedEffort
+                        + "已自动顺延至" + next.getYear() + "年" + next.getMonthValue() + "月",
+                BIZ_TYPE, req.getId());
+
+        ScheduleRowSaveResultVO.OverflowVO overflow = new ScheduleRowSaveResultVO.OverflowVO();
+        overflow.setYear(next.getYear());
+        overflow.setMonth(next.getMonthValue());
+        overflow.setCarriedEffort(carriedEffort);
+        return overflow;
+    }
+
+    /**
+     * 取下月排期表，不存在则自动创建（created_by=操作人，跨年自动进位）
+     */
+    private ScheduleMonth resolveOrCreateNextMonth(ScheduleMonth month, Long operatorId) {
+        YearMonth next = YearMonth.of(month.getYear(), month.getMonth()).plusMonths(1);
+        ScheduleMonth nextMonth = scheduleMonthMapper.selectOne(new LambdaQueryWrapper<ScheduleMonth>()
+                .eq(ScheduleMonth::getYear, next.getYear())
+                .eq(ScheduleMonth::getMonth, next.getMonthValue()));
+        if (nextMonth == null) {
+            nextMonth = new ScheduleMonth();
+            nextMonth.setYear(next.getYear());
+            nextMonth.setMonth(next.getMonthValue());
+            nextMonth.setCreatedBy(operatorId);
+            scheduleMonthMapper.insert(nextMonth);
+        }
+        return nextMonth;
+    }
+
+    /**
+     * 需求在下月行的展示序号：该需求在下月已有行则沿用其 seq，否则 = 下月已有需求数+1
+     */
+    private int resolveNextMonthSeq(ScheduleMonth nextMonth, Long requirementId) {
+        ScheduleRow sameReqRow = scheduleRowMapper.selectOne(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getMonthId, nextMonth.getId())
+                .eq(ScheduleRow::getRequirementId, requirementId)
+                .last("LIMIT 1"));
+        return sameReqRow != null ? sameReqRow.getSeq()
+                : scheduleRowMapper.countRequirementsInMonth(nextMonth.getId()).intValue() + 1;
+    }
+
+    /**
+     * 复制行结果 VO 构造
+     */
+    private CopyRowResultVO toCopyResult(Long monthId, boolean inserted) {
+        CopyRowResultVO vo = new CopyRowResultVO();
+        vo.setMonthId(monthId);
+        vo.setDuplicated(inserted);
+        return vo;
+    }
+
+    /**
+     * 需求状态条件更新（eq status 防并发覆盖，如期间被取消/归档），返回是否实际更新
+     */
+    private boolean advanceStatus(Long requirementId, String expect, String target) {
+        return requirementMapper.update(null, new LambdaUpdateWrapper<Requirement>()
+                .eq(Requirement::getId, requirementId)
+                .eq(Requirement::getStatus, expect)
+                .set(Requirement::getStatus, target)) > 0;
+    }
+
+    /**
+     * 通知需求全部参与人（按用户去重）
+     */
+    private void notifyAllParticipants(Requirement req, String title, String content) {
+        List<RequirementParticipant> participants = participantMapper.selectList(
+                new LambdaQueryWrapper<RequirementParticipant>()
+                        .eq(RequirementParticipant::getRequirementId, req.getId()));
+        participants.stream().map(RequirementParticipant::getUserId).distinct().forEach(receiverId ->
+                notificationService.send(receiverId, NotifyTypes.REQ_STATUS_CHANGED, title, content,
+                        BIZ_TYPE, req.getId()));
+    }
+
+    // ==================== 私有工具方法 ====================
+
+    /**
+     * 查询该行当前全部格子（day -> value）
+     */
+    private Map<LocalDate, BigDecimal> loadRowCells(Long rowId) {
+        return scheduleCellMapper.selectList(new LambdaQueryWrapper<ScheduleCell>()
+                        .eq(ScheduleCell::getRowId, rowId))
+                .stream().collect(Collectors.toMap(ScheduleCell::getDay, ScheduleCell::getValue,
+                        (a, b) -> a, LinkedHashMap::new));
+    }
+
+    /**
+     * 格子集合比对（用 compareTo 比较，忽略 BigDecimal 精度差异如 1.0 与 1.00）
+     */
+    private boolean cellsEquals(Map<LocalDate, BigDecimal> a, Map<LocalDate, BigDecimal> b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (Map.Entry<LocalDate, BigDecimal> entry : a.entrySet()) {
+            BigDecimal other = b.get(entry.getKey());
+            if (other == null || entry.getValue().compareTo(other) != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 按 id 查询排期行，不存在抛 404
+     */
+    private ScheduleRow requireRow(Long rowId) {
+        ScheduleRow row = scheduleRowMapper.selectById(rowId);
+        if (row == null) {
+            throw new BizException(404, "排期行不存在");
+        }
+        return row;
+    }
+
+    /**
+     * 按 id 查询月表，不存在抛 404
+     */
+    private ScheduleMonth requireMonth(Long monthId) {
+        ScheduleMonth month = scheduleMonthMapper.selectById(monthId);
+        if (month == null) {
+            throw new BizException(404, "排期表不存在");
+        }
+        return month;
+    }
+
+    /**
+     * 按 id 查询需求，不存在抛 404
+     */
+    private Requirement requireRequirement(Long requirementId) {
+        Requirement req = requirementMapper.selectById(requirementId);
+        if (req == null) {
+            throw new BizException(404, "需求不存在");
+        }
+        return req;
+    }
+
+    /**
+     * 按 id 查询项目，不存在抛 404
+     */
+    private Project requireProject(Long projectId) {
+        Project project = projectMapper.selectById(projectId);
+        if (project == null) {
+            throw new BizException(404, "项目不存在");
+        }
+        return project;
+    }
+
+    /**
+     * 写操作日志（biz_type=REQUIREMENT，需求恒 round_no=1）
+     */
+    private void writeLog(Long requirementId, Long operatorId, String action, String remark) {
+        BizOperationLog log = new BizOperationLog();
+        log.setBizType(BIZ_TYPE);
+        log.setBizId(requirementId);
+        log.setOperatorId(operatorId);
+        log.setAction(action);
+        log.setRoundNo(1);
+        log.setRemark(remark);
+        operationLogMapper.insert(log);
+    }
+
+    /**
+     * 查询用户姓名，用户不存在时回退为 userId 字符串
+     */
+    private String userName(Long userId) {
+        User user = userMapper.selectById(userId);
+        return user == null ? String.valueOf(userId) : user.getRealName();
+    }
+
+    /**
+     * 工种代码 -> 中文名（通知内容用）
+     */
+    private String craftName(String craft) {
+        return CraftConstants.CRAFT_NAMES.getOrDefault(craft, craft);
+    }
+
+    /**
+     * 月表实体 -> VO
+     */
+    private ScheduleMonthVO toMonthVO(ScheduleMonth month) {
+        ScheduleMonthVO vo = new ScheduleMonthVO();
+        vo.setId(month.getId());
+        vo.setYear(month.getYear());
+        vo.setMonth(month.getMonth());
+        return vo;
+    }
+
+    /**
+     * 排期行实体 -> 视图 VO
+     */
+    private ScheduleViewVO.RowVO toRowVO(ScheduleRow row, List<ScheduleCell> cells, Map<Long, String> nameMap) {
+        ScheduleViewVO.RowVO vo = new ScheduleViewVO.RowVO();
+        vo.setRowId(row.getId());
+        vo.setCraft(row.getCraft());
+        vo.setUserId(row.getUserId());
+        vo.setRealName(nameMap.get(row.getUserId()));
+        vo.setStatus(row.getStatus());
+        vo.setIsOverflow(row.getIsOverflow());
+        vo.setPlannedEffort(row.getPlannedEffort());
+        vo.setUpdatedAt(toMillis(row.getUpdatedAt()));
+        Map<String, BigDecimal> cellMap = new LinkedHashMap<>();
+        cells.forEach(cell -> cellMap.put(cell.getDay().toString(), cell.getValue()));
+        vo.setCells(cellMap);
+        return vo;
+    }
+
+    /**
+     * LocalDateTime -> 毫秒时间戳（前端编辑时原样回传做乐观锁校验），null 安全
+     */
+    private Long toMillis(LocalDateTime time) {
+        return time == null ? null : time.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+    }
+
+    /**
+     * 计算下一次 updated_at：截断到秒并保证严格大于旧值，
+     * 避免数据库秒级精度下同秒内连续编辑导致乐观锁版本不前进
+     */
+    private LocalDateTime nextVersionTime(LocalDateTime oldTime) {
+        LocalDateTime now = LocalDateTime.now().withNano(0);
+        if (oldTime != null && !now.isAfter(oldTime)) {
+            return oldTime.plusSeconds(1);
+        }
+        return now;
+    }
+}

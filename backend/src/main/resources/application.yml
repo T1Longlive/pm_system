@@ -1,0 +1,50 @@
+# 项目管理系统后端配置
+server:
+  port: 8080
+
+spring:
+  application:
+    name: pm-backend
+  datasource:
+    # MySQL 数据源（本机 pm_system 库）
+    url: jdbc:mysql://localhost:3306/pm_system?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      # Redis：需求/Bug 编号流水号、统计缓存使用
+      host: localhost
+      port: 6379
+      database: 0
+      # 本机 Redis 已开启密码认证
+      password: 123456
+  servlet:
+    multipart:
+      # 附件上传大小上限：文档类 ≤50MB（Service 层白名单校验），
+      # 此处略放宽到 60MB 以便超大文件也能收到明确的业务 400 提示而非系统异常
+      max-file-size: 60MB
+      max-request-size: 65MB
+
+# MyBatis-Plus 配置
+mybatis-plus:
+  configuration:
+    # 数据库下划线列名 <-> Java 驼峰属性 自动映射
+    map-underscore-to-camel-case: true
+    # 开发环境打印 SQL 到控制台（生产环境请移除该配置）
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    # 关闭 MyBatis-Plus 启动 banner
+    banner: false
+
+# JWT 配置
+jwt:
+  # 签名密钥：HS256 要求至少 32 字符，生产环境请务必更换
+  secret: pm-system-jwt-secret-key-change-me-in-production-0123456789abcdef
+  # token 有效期（分钟），7200 分钟 = 5 天
+  expire: 7200
+
+# 附件存储配置
+pm:
+  # 附件存储根目录：按 {yyyy}/{MM}/{uuid}.{ext} 子目录组织，经 /upload/** 静态映射对外访问
+  upload-dir: D:/pm-upload

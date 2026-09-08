@@ -1,0 +1,21 @@
+# 依赖与构建产物
+node_modules/
+dist/
+dist-ssr/
+target/
+
+# 仓库内置工具链（体积大，不入库）
+.tools/
+
+# IDE / 编辑器
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# TRAE 本地会话
+.trae/
+
+# 日志与本地环境
+logs/
+*.log
+*.local
