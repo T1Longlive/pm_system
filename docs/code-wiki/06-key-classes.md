@@ -48,30 +48,25 @@
 
 ## 4. `ScheduleServiceImpl` —— 排期核心（全系统最复杂）
 
-常量：行状态 `TODO/DONE/VOID`；开发类工种 `DEV_CRAFTS = {FE, BE, OPS}`；`EFFORT_MAX = 999.99`；可排班日 = `WORKDAY/ADJUSTED`。
+常量：行状态 `TODO/VOID`（DONE 已废弃，行完成态由前端按「工期 vs 已排合计」派生）；`EFFORT_MAX = 999.99`；可排班日 = `WORKDAY/ADJUSTED`。
 
 | 方法 | 权限 | 核心逻辑 |
 |------|------|------|
 | `createMonth` | 管理员或任意项目 PM | 年月唯一（400「该月排期表已存在」） |
 | `addRequirement` | 该需求项目的 PM | 需求必须 PENDING；同需求同月只生成一次；按 `requirement_participant` 逐行生成（一行=工种×负责人，status=TODO），`seq = 当月需求数+1`；**需求保持 PENDING**；返回行数（参与人为空返回 0） |
 | `saveRow` | 该项目 PM | 见下方六步详解 |
-| `doneRow` | 行负责人本人或 PM 代点 | 仅 TODO（重复完成/VOID 400）；置 DONE + doneAt/doneBy；写 NODE_DONE 日志；事务内 `checkAndAdvanceStatus` 并返回需求新状态 |
+| `copyRow` | 该项目 PM | 手动「添加到下月」：复制行带原工期至下月表（不存在自动创建、跨年进位），幂等（下月已有同键行不插） |
 | `getMonthView` | 登录 | 月信息 + 整月日历（灰显依据）+ 当月全部行（含 VOID）按「工种+id」排序 → 按需求分组（GroupVO），groups 按 seq 升序；列全部 JOIN 派生不冗余存储 |
-| `advanceReadyRequirements` | 定时任务调用 | 查 READY 且任一 FE/BE/OPS 行存在 `day <= today` 格子的需求，逐个条件更新 READY→DEV（**不通知**），返回推进数 |
+| `advanceBySchedule` | 定时任务调用 | ① READY 且全部行排满 → DEV（**排满即时推进在 saveRow 完成并通知，此处兜底存量，不通知**）；② DEV 且全部非 QA 行格子日 < today → TEST（通知）；③ TEST 且全部行格子日 < today → ARCHIVING（通知） |
 
 ### `saveRow` 六步详解（格子保存核心）
 
-1. **校验链**：行必须 TODO → 乐观锁（dto.updatedAt 毫秒 vs 行 updated_at，不一致 409）→ `plannedEffort` 校验（可空、>0、≤2 位小数、≤999.99）→ `checkAndNormalizeCells` 格子校验。
+1. **校验链**：行非 VOID（TODO 可编辑）→ 乐观锁（dto.updatedAt 毫秒 vs 行 updated_at，不一致 409）→ `plannedEffort` 校验（可空、>0、0.1 步进、≤999.99）→ `checkAndNormalizeCells` 格子校验。
 2. **格子校验 `checkAndNormalizeCells`**：日期可解析且属于本月；必须可排班日（否则「X日为非工作日」）；单格 `0 < v ≤ 1` 且为 0.1 整数倍（BigDecimal：`v×10` 与最近整数差 ≤1e-8），规范化一位小数落库。
 3. **同人同日限额 `checkUserDayTotal`**：SQL 统计该用户该日除本行外全部非 VOID 行格子合计，`day` 为绝对日期天然跨月对齐，合计 ≤1 否则 400。
 4. **落库**：**全量替换**该行格子（先 delete 后逐格 insert，空 map=清空）；LambdaUpdateWrapper 更新 plannedEffort（null=清空）并显式推进 updated_at。
 5. **跨月顺延 `checkAndCreateOverflow`**：条件 = plannedEffort 非空 且 当月格子合计 < 计划工期 且 当月剩余可排工作日为 0 → 下月表不存在则自动创建（跨年进位）→ 幂等检查（下月已有同需求+工种+负责人行不插）→ 插入 `is_overflow=1` 顺延行（planned_effort=剩余工期，格子空白）→ 通知负责人 `SCHEDULE_OVERFLOW`；返回 OverflowVO{year, month, carriedEffort}。
-6. **联动与通知**：需求仍 PENDING 则条件更新 `advanceStatus(PENDING→READY)`（eq status 防并发，如期间被取消则不推进），成功写 SCHEDULE_SAVE 日志；格子与库中比对（compareTo 忽略精度）有实际变化 → 通知行负责人 `SCHEDULE_CHANGED`；返回新 updatedAt + overflow。
-
-### 状态推进 `checkAndAdvanceStatus`
-
-- 取该需求**所有月份**的全部非 VOID 行；DEV 或 READY 且全部开发类行（FE/BE/OPS）DONE → 推进 TEST（通知参与人；READY 也参与判定，避免定时任务推进前已全部完成导致卡死）；随后 TEST 且全部行 DONE → 推进 ARCHIVING（通知参与人，级联复查）。
-- `advanceStatus` 用 `eq(status, expect)` 条件更新防并发覆盖。
+6. **排满即时推进与通知**：`countNotFullRows==0`（全部非 VOID 行有工期且格子合计≥工期，跨全部月份）→ 依次条件更新 `advanceStatus(PENDING→READY)`、`advanceStatus(READY→DEV)`（**连跳**，「已排期」节点即时完成；各自写 SCHEDULE_SAVE 日志并通知参与人；eq status 防并发，如期间被取消则不推进）；格子与库中比对（compareTo 忽略精度）有实际变化 → 通知行负责人 `SCHEDULE_CHANGED`；返回新 updatedAt + overflow。
 
 ## 5. 其他 Service 要点
 
@@ -111,7 +106,7 @@
 
 ## 7. 定时任务 `task/RequirementStatusTask`
 
-- `@Scheduled(cron = "0 0 * * * *")` **每小时整点**执行 `advanceReadyRequirements()`：READY 且存在开发类（FE/BE/OPS）行最早已排日期 ≤ 今天 → 推进 DEV，**不发通知**；执行后 `log.info` 记录推进数。
+- `@Scheduled(cron = "0 0 * * * *")` **每小时整点**执行 `advanceBySchedule()`：① READY 且全部行已排满 → DEV（兜底存量，保存时已即时推进并通知，**不通知**）；② DEV 且全部非 QA 行格子日 < 今天 → TEST（通知）；③ TEST 且全部行格子日 < 今天 → ARCHIVING（通知）；执行后 `log.info` 记录推进数。
 - 由启动类 `@EnableScheduling` 启用。多实例部署需注意避免重复执行（见 [08-run-deploy.md](08-run-deploy.md)）。
 
 ## 8. 前端关键实现

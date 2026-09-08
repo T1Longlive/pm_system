@@ -169,26 +169,25 @@ notification：receiver_id → user
 ## 4. 需求状态机与触发源
 
 ```
-                    ┌──────────── 定时任务（每小时，有开发行日期≤今天，不通知）──────────┐
-                    │                                                                  ▼
- PENDING ──排期行首次保存──► READY ──────────────────────────────────────────────────► DEV
- (待排期)                    (待开始)    ┌──── 全部开发类行(FE/BE/OPS) DONE（通知参与人）────┤
-                    │                    │                                                │
-                    │   READY 也可直接进入判定（定时任务推进前已全部完成，避免卡死）              │
-                    ▼                    ▼                                                ▼
-                CANCELLED ◄──PM 取消(任意非终态)          TEST ──── 全部行 DONE（通知参与人）──► ARCHIVING
-                (已取消,终态)                            (测试中)                              (待归档)
-                                                                                             │ PM 手动归档
-                                                                                             ▼
-                                                                                         ARCHIVED (终态)
+ PENDING ──全部行排满(保存时即时,通知)──► READY ──同一次保存连续推进(通知)──► DEV
+ (待排期)                                 (已排期)                            (开发中)
+     │                                       │                                  │
+     │  定时任务每小时按同口径兜底存量 READY                                    │ ┌─ 全部开发类行(FE/BE/OPS)
+     │                                       │                                  │ │  格子日<今天(定时任务,通知)
+     ▼                                       ▼                                  ▼ ▼
+ CANCELLED ◄──PM 取消(任意非终态)────────────────────── TEST ──全部行(含QA)格子日<今天──► ARCHIVING
+ (已取消,终态)                                          (测试中)    (定时任务,通知)      (待归档)
+                                                                                       │ PM 手动归档
+                                                                                       ▼
+                                                                                   ARCHIVED (终态)
 ```
 
 | 流转 | 触发源 | 实现位置 |
 |------|------|------|
-| PENDING → READY | 排期行首次保存格子（条件更新防并发） | `ScheduleServiceImpl.saveRow` |
-| READY → DEV | 定时任务每小时（任一 FE/BE/OPS 行最早已排日期 ≤ 今天），**不通知** | `RequirementStatusTask` → `advanceReadyRequirements` |
-| DEV / READY → TEST | 节点完成后该需求全部开发类行 DONE，通知参与人 | `ScheduleServiceImpl.doneRow → checkAndAdvanceStatus` |
-| TEST → ARCHIVING | 全部行（含 QA 等）DONE，通知参与人（级联复查） | 同上 |
+| PENDING → READY | 排满即时：全部非 VOID 行有工期且格子合计 ≥ 工期（保存排期时判定，通知参与人） | `ScheduleServiceImpl.saveRow` |
+| READY → DEV | 同一次保存连续推进（通知参与人）；定时任务每小时按同口径兜底存量（不通知） | `ScheduleServiceImpl.saveRow` / `RequirementStatusTask.advanceBySchedule` |
+| DEV → TEST | 定时任务每小时：全部非 QA 非 VOID 行的格子日 < 今天（通知参与人） | `RequirementStatusTask` → `advanceBySchedule` |
+| TEST → ARCHIVING | 定时任务每小时：全部非 VOID 行（含 QA）的格子日 < 今天（通知参与人） | 同上 |
 | ARCHIVING → ARCHIVED | PM 手动归档 | `RequirementServiceImpl.archiveRequirement` |
 | 任意非终态 → CANCELLED | PM 手动取消（原因必填），通知参与人+策划 | `RequirementServiceImpl.cancelRequirement` |
 

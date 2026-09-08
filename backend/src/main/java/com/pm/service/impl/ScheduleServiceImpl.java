@@ -64,8 +64,8 @@ import java.util.stream.Collectors;
  * 3. 跨月：plannedEffort 非空 且 当月格子合计<plannedEffort 且 当月剩余可填工作日数为 0 时，
  *    自动创建下月表并追加 is_overflow=1 的顺延行；PM 也可手动"添加到下月"（复制行，带原工期）
  * 4. 行状态：仅 TODO/VOID 落库；已排/排期中/未排期三态由前端按 工期 vs 已排合计 派生
- * 5. 需求状态推进（全部日期驱动）：全部非 VOID 行排满 → PENDING→READY（保存时触发，通知）；
- *    任一行格子日≤今天 → READY→DEV；全部非 QA 行格子日<今天 → DEV→TEST（通知）；
+ * 5. 需求状态推进：全部非 VOID 行排满 → PENDING→READY→DEV（保存时连续触发，通知；"已排期"节点即时完成，
+ *    定时任务每小时按同口径兜底存量）；全部非 QA 行格子日<今天 → DEV→TEST（通知）；
  *    全部行格子日<今天 → TEST→ARCHIVING（通知）；ARCHIVING→ARCHIVED 由需求详情 PM 手动归档
  */
 @Service
@@ -325,16 +325,25 @@ public class ScheduleServiceImpl implements ScheduleService {
         ScheduleRowSaveResultVO.OverflowVO overflow =
                 checkAndCreateOverflow(row, month, req, dto.getPlannedEffort(), newCells, monthDays, userId);
 
-        // 排满检查：PENDING 需求且全部非 VOID 行（跨全部月份）均已排满 → READY（已排期）
+        // 排满检查：PENDING/READY 需求且全部非 VOID 行（跨全部月份）均已排满 → 即时推进
         // 已排满定义：每行 planned_effort>0 且 该行 schedule_cell 合计 >= planned_effort（含本行刚保存的格子）
-        if (REQ_PENDING.equals(req.getStatus())) {
-            Long notFullCount = scheduleRowMapper.countNotFullRows(req.getId());
-            if (notFullCount != null && notFullCount == 0 && advanceStatus(req.getId(), REQ_PENDING, REQ_READY)) {
-                writeLog(req.getId(), userId, "SCHEDULE_SAVE",
-                        "排期保存：" + req.getReqNo() + "，全部排期行已排满，需求进入已排期");
-                notifyAllParticipants(req, "需求状态变更",
-                        "需求「" + req.getTitle() + "」已完成排期，进入已排期");
-            }
+        // PENDING→READY→DEV 连续推进：首次排满时"已排期"节点即时完成（变绿），不等日期驱动的定时任务
+        Long notFullCount = scheduleRowMapper.countNotFullRows(req.getId());
+        boolean allFull = notFullCount != null && notFullCount == 0;
+        if (allFull && REQ_PENDING.equals(req.getStatus())
+                && advanceStatus(req.getId(), REQ_PENDING, REQ_READY)) {
+            writeLog(req.getId(), userId, "SCHEDULE_SAVE",
+                    "排期保存：" + req.getReqNo() + "，全部排期行已排满，需求进入已排期");
+            notifyAllParticipants(req, "需求状态变更",
+                    "需求「" + req.getTitle() + "」已完成排期，进入已排期");
+            req.setStatus(REQ_READY);
+        }
+        if (allFull && REQ_READY.equals(req.getStatus())
+                && advanceStatus(req.getId(), REQ_READY, REQ_DEV)) {
+            writeLog(req.getId(), userId, "SCHEDULE_SAVE",
+                    "排期保存：" + req.getReqNo() + "，全部负责人排期已完成，需求进入开发中");
+            notifyAllParticipants(req, "需求状态变更",
+                    "需求「" + req.getTitle() + "」全部负责人排期已完成，进入开发中");
         }
 
         // 通知该行负责人：排期被修改（仅格子实际变化时）
@@ -407,8 +416,8 @@ public class ScheduleServiceImpl implements ScheduleService {
     public int advanceBySchedule() {
         int advanced = 0;
         LocalDate today = LocalDate.now();
-        // 1) READY→DEV：任一非 VOID 行（不限工种）存在格子日 ≤ 今天（不通知）
-        for (Long reqId : scheduleRowMapper.selectReadyReqIdsWithDueCell(today)) {
+        // 1) READY→DEV：全部非 VOID 行已排满（排期完成即进入开发中，不通知——保存排期时已即时推进并通知，此处每小时兜底存量）
+        for (Long reqId : scheduleRowMapper.selectReadyReqIdsAllFull()) {
             if (advanceStatus(reqId, REQ_READY, REQ_DEV)) {
                 advanced++;
             }

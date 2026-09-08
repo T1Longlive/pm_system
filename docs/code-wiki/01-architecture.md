@@ -58,7 +58,7 @@ pm-system 采用经典的**前后端分离 B/S 架构**：Vue 3 单页应用（S
 | 支撑配置 | `config`（3 个） | 分页插件、CORS + 拦截器注册 + 静态资源映射、附件目录属性 | — |
 | 认证 | `security`（3 个） | JWT 签发/解析、登录拦截、当前用户/管理员校验 | → mapper |
 | 公共 | `common`（4 个） | 统一返回 `Result`、业务异常 `BizException`、全局异常处理器、常量 | — |
-| 定时 | `task`（1 个） | 每小时推进 READY→DEV | → service |
+| 定时 | `task`（1 个） | 每小时状态推进（READY→DEV 兜底 / DEV→TEST / TEST→ARCHIVING） | → service |
 
 **依赖原则**：上层依赖下层；Service 之间协作单向（排期 → 日历/通知）；实体/DTO/VO 不反向依赖上层；全项目无循环依赖。
 
@@ -93,12 +93,13 @@ PM 创建月度排期表（schedule_month，年月唯一）
         │  「从需求池添加」→ 按参与人自动生成排期行（schedule_row：一行=工种×负责人）
         ▼
 PM 在月矩阵上填格子（schedule_cell：日×工作量0~1）
-        │  首次保存触发 PENDING→READY；计划工期超出当月 → 自动跨月顺延 is_overflow 行
+        │  计划工期超出当月 → 自动跨月顺延 is_overflow 行
         ▼
-定时任务每小时：READY 且有开发类行（FE/BE/OPS）最早日期≤今天 → DEV 开发中
-        │  负责人（或 PM 代点）完成排期行 → DONE
+全部行排满（每行工期>0 且格子合计≥工期）→ 保存时即时连续推进 PENDING→READY→DEV（通知参与人，
+        │  "已排期"节点即时完成变绿）；定时任务每小时按同口径兜底存量 READY 需求
         ▼
-该需求全部开发类行 DONE → TEST 测试中 → 全部行 DONE → ARCHIVING 待归档
+全部开发类行（FE/BE/OPS）格子日 < 今天 → TEST 测试中 → 全部行（含QA）格子日 < 今天 → ARCHIVING 待归档
+        │  （定时任务每小时，日期驱动）
         ▼
 PM 手动归档 → ARCHIVED 已归档（终态）；任意非终态 PM 可取消 → CANCELLED（终态）
 ```
@@ -147,7 +148,7 @@ PM 或管理员归档 → 进归档表（只读，可删除）；重新打开 �
 | 编号生成 | Redis `INCR seq:req:{projectId}` / `seq:bug:{projectId}`，key 缺失时从 DB `MAX(CAST(RIGHT(xxx_no,4)))` 回填（SETNX 防竞态） | `RequirementServiceImpl.generateReqNo` / `BugServiceImpl.generateBugNo` |
 | 操作留痕 | 统一写 `biz_operation_log`（bizType+bizId+action+remark，需求恒 round_no=1） | 各 ServiceImpl（Bug 模块暂未接入） |
 | 站内通知 | `NotificationService.send` 同步落库，content 截断 300 字 | 各 ServiceImpl（Bug 模块暂未接入） |
-| 定时任务 | `@Scheduled(cron="0 0 * * * *")` 每小时整点推进 READY→DEV（不通知） | `task/RequirementStatusTask` |
+| 定时任务 | `@Scheduled(cron="0 0 * * * *")` 每小时整点推进状态：READY→DEV（排满兜底，不通知）/ DEV→TEST / TEST→ARCHIVING（日期驱动，通知） | `task/RequirementStatusTask` |
 
 ## 7. 技术栈组件速查
 

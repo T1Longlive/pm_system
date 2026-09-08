@@ -32,14 +32,16 @@ public interface ScheduleRowMapper extends BaseMapper<ScheduleRow> {
     Long countRequirementsInMonth(@Param("monthId") Long monthId);
 
     /**
-     * 定时任务候选（READY→DEV，日期驱动）：查询状态为 READY 且任一非 VOID 行（不限工种）
-     * 存在已排日期 ≤ today 的格子（对应"任一工种开工即开发中"）的需求 ID 集合
+     * 定时任务候选（READY→DEV，排满驱动）：需求为 READY 且全部非 VOID 行已排满——
+     * 存在非 VOID 行，且每行有工期（>0）且格子合计 ≥ 工期（与 countNotFullRows 同口径的批量版，
+     * 兜底存量数据：排满即时推进在保存排期时完成，此处每小时补扫漏网）
      */
-    @Select("SELECT DISTINCT r.requirement_id FROM schedule_row r " +
-            "JOIN schedule_cell c ON c.row_id = r.id " +
-            "JOIN requirement q ON q.id = r.requirement_id " +
-            "WHERE q.status = 'READY' AND r.status != 'VOID' AND c.day <= #{today}")
-    List<Long> selectReadyReqIdsWithDueCell(@Param("today") LocalDate today);
+    @Select("SELECT q.id FROM requirement q WHERE q.status = 'READY' " +
+            "AND EXISTS (SELECT 1 FROM schedule_row r WHERE r.requirement_id = q.id AND r.status != 'VOID') " +
+            "AND NOT EXISTS (SELECT 1 FROM schedule_row r WHERE r.requirement_id = q.id AND r.status != 'VOID' " +
+            "AND (r.planned_effort IS NULL OR r.planned_effort <= 0 " +
+            "OR r.planned_effort > (SELECT COALESCE(SUM(c.value), 0) FROM schedule_cell c WHERE c.row_id = r.id)))")
+    List<Long> selectReadyReqIdsAllFull();
 
     /**
      * 定时任务候选（DEV→TEST，日期驱动）：需求为 DEV 且

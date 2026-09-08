@@ -87,8 +87,8 @@ const flatRows = computed<FlatRow[]>(() => {
   )
 })
 
-// 需求级合并列下标：编号(0) / 需求名称(1) / 项目(4) / 策划(5) / 优先级(6)——负责人(2)/工种(3)为行级列不合并
-const GROUP_COL_INDEXES = [0, 1, 4, 5, 6]
+// 需求级合并列下标：编号(0) / 需求名称(1) / 项目(2) / 策划(3) / 优先级(4)——工种(5)/负责人(6)为行级列不合并
+const GROUP_COL_INDEXES = [0, 1, 2, 3, 4]
 // 合并单元格配置：同一需求连续行的需求级列纵向合并
 const mergeCells = computed<VxeTablePropTypes.MergeCells>(() => {
   const result: VxeTablePropTypes.MergeCells = []
@@ -538,14 +538,16 @@ onMounted(async () => {
             :header-cell-class-name="headerCellClassName"
             :column-config="{ resizable: true }"
             :scroll-x="{ enabled: false }"
-            :scroll-y="{ enabled: false }"
+            :scroll-y="{ enabled: false, gt: 0 }"
+            :show-header-overflow="true"
+            height="auto"
             border
             size="small"
             class="matrix-table"
           >
             <!-- 需求级列：编号 / 需求名称（固定列）；项目/策划/优先级随滚动，为日期列让位 -->
             <vxe-column field="seq" title="编号" width="42" align="center" fixed="left" />
-            <vxe-column field="title" title="需求名称" width="140" fixed="left">
+            <vxe-column field="title" title="需求名称" width="140" align="center" fixed="left">
               <template #default="{ row }">
                 <div class="req-cell" @click="goDetail(row.requirementId)">
                   <span class="req-no">{{ row.reqNo }}</span>
@@ -553,29 +555,12 @@ onMounted(async () => {
                 </div>
               </template>
             </vxe-column>
-            <vxe-column field="realName" title="负责人" width="80" fixed="left">
-              <template #default="{ row }">
-                <span class="owner-cell">
-                  <span class="cell-text">{{ row.row.realName }}</span>
-                  <span
-                    v-if="row.row.isOverflow === 1"
-                    class="overflow-badge"
-                    title="由上月顺延生成"
-                  >延</span>
-                </span>
-              </template>
-            </vxe-column>
-            <vxe-column field="craft" title="工种" width="80">
-              <template #default="{ row }">
-                <span class="cell-text">{{ craftLabel(row.row.craft) }}</span>
-              </template>
-            </vxe-column>
-            <vxe-column field="projectName" title="项目" min-width="72">
+            <vxe-column field="projectName" title="项目" min-width="72" align="center">
               <template #default="{ row }">
                 <span class="cell-text" :title="row.projectName">{{ row.projectName }}</span>
               </template>
             </vxe-column>
-            <vxe-column field="plannerName" title="策划" min-width="64">
+            <vxe-column field="plannerName" title="策划" min-width="64" align="center">
               <template #default="{ row }">
                 <span class="cell-text">{{ row.plannerName || '—' }}</span>
               </template>
@@ -587,8 +572,25 @@ onMounted(async () => {
                 </el-tag>
               </template>
             </vxe-column>
+            <vxe-column field="craft" title="工种" width="80" align="center">
+              <template #default="{ row }">
+                <span class="cell-text">{{ craftLabel(row.row.craft) }}</span>
+              </template>
+            </vxe-column>
+            <vxe-column field="realName" title="负责人" width="80" align="center">
+              <template #default="{ row }">
+                <span class="owner-cell">
+                  <span class="cell-text">{{ row.row.realName }}</span>
+                  <span
+                    v-if="row.row.isOverflow === 1"
+                    class="overflow-badge"
+                    title="由上月顺延生成"
+                  >延</span>
+                </span>
+              </template>
+            </vxe-column>
             <!-- 行级列：工期 / 已排 -->
-            <vxe-column field="plannedEffort" title="工期" width="80">
+            <vxe-column field="plannedEffort" title="工期" width="80" align="center">
               <template #default="{ row }">
                 <el-input-number
                   v-model="row.row.plannedEffort"
@@ -681,10 +683,9 @@ onMounted(async () => {
           </vxe-table>
           <!-- 图例说明 -->
           <div class="matrix-legend">
-            <span class="legend-item"><i class="legend-swatch filled" />已排工作量</span>
+            <span class="legend-item legend-tip">格子点击填写：0.1 步进，单格 0~1；失焦或回车自动保存（已排格子以深蓝粗体数字显示）</span>
             <span class="legend-item"><i class="legend-swatch locked" />周末 / 节假日（不可排）</span>
             <span class="legend-item"><i class="legend-swatch adjusted" />调休上班</span>
-            <span class="legend-item legend-tip">格子点击填写：0.1 步进，单格 0~1；失焦或回车自动保存</span>
           </div>
         </template>
       </div>
@@ -700,11 +701,14 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-/* 页面：纵向排布工具栏与矩阵卡片 */
+/* 页面：纵向排布工具栏与矩阵卡片，整体占满可视高度（外层不出滚动条） */
 .schedule-page {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  /* 视口高度 - 顶栏 60px - el-main 上下内边距 40px，页面自身不产生滚动 */
+  height: calc(100vh - 100px);
+  overflow: hidden;
 }
 
 /* 顶部工具栏：白底圆角，操作按钮靠右 */
@@ -731,13 +735,35 @@ onMounted(async () => {
   gap: 4px;
 }
 
-/* 矩阵外层：白卡内滚动 */
+/* 矩阵外层：白卡内滚动；卡片弹性填充剩余高度 */
 .table-card {
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
+/* 卡片体同样纵向弹性填充 */
+.table-card :deep(.el-card__body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 表格容器：弹性填充（表格 height="auto" 据此计算可见区域，超出在表格内部滚动） */
 .matrix-wrap {
-  min-height: 320px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 表格占满容器剩余空间（图例在下方自动占位） */
+.matrix-wrap :deep(.matrix-table) {
+  flex: 1;
+  min-height: 0;
 }
 
 /* 首月引导文案 */
@@ -859,16 +885,12 @@ onMounted(async () => {
   color: #303133;
 }
 
-/* 可编辑格子：手型 + 悬停高亮 */
+/* 可编辑格子：手型；悬停不加填充色 */
 .cell-value.editable {
   cursor: pointer;
 }
 
-.cell-value.editable:hover {
-  background: #d9ecff;
-}
-
-/* 编辑态输入框：铺满格子、居中无边框 */
+/* 编辑态输入框：铺满格子、居中无边框，聚焦与输入均为透明底 */
 .cell-input {
   width: 100%;
   padding: 0;
@@ -878,6 +900,14 @@ onMounted(async () => {
   border: none;
   border-bottom: 1px solid #409eff;
   outline: none;
+}
+
+.cell-input:focus {
+  background: transparent;
+}
+
+.cell-input::selection {
+  background: transparent;
 }
 
 /* 图例 */
@@ -909,16 +939,10 @@ onMounted(async () => {
   border-radius: 2px;
 }
 
-/* 已排：中蓝（与格子同步加深） */
-.legend-swatch.filled {
-  background: #c6e2ff;
-  border: 1px solid #8cc5ff;
-}
-
 /* 不可排：斜纹灰底加深（与格子同步） */
 .legend-swatch.locked {
-  background: repeating-linear-gradient(45deg, #dfe3ea, #dfe3ea 2px, #c5cdd9 2px, #c5cdd9 4px);
-  border: 1px solid #c5cdd9;
+  background: repeating-linear-gradient(45deg, #cdd3dd, #cdd3dd 2px, #aab4c4 2px, #aab4c4 4px);
+  border: 1px solid #aab4c4;
 }
 
 /* 调休：深绿色 */
@@ -939,23 +963,29 @@ onMounted(async () => {
   border-bottom: 1px solid #303133;
 }
 
-/* 有值格子：加深蓝色底 + 深蓝粗体数字，扫视更清晰 */
+/* 有值格子：不加背景色，仅深蓝粗体数字标识 */
 :deep(td.cell-filled) {
-  background-color: #c6e2ff;
   font-weight: 700;
   color: #1b4f8a;
 }
 
-/* 非可排班日格子：斜纹灰底加深（高对比条纹，与可排班白格明显区分，提高特异度压过 vxe 默认 background-image） */
+/* 非可排班日格子：斜纹底加深（底色与条纹再加深一档，与可排班白格明显区分；!important 压过 vxe 默认 background-image） */
 :deep(td.vxe-body--column.cell-locked) {
-  background-color: #dfe3ea;
+  background-color: #cdd3dd !important;
   background-image: repeating-linear-gradient(
     45deg,
     transparent,
     transparent 3px,
-    #c5cdd9 3px,
-    #c5cdd9 6px
+    #aab4c4 3px,
+    #aab4c4 6px
   ) !important;
+  cursor: not-allowed;
+}
+
+/* 非可排班日格子的内部展示元素：同样禁止光标，悬浮提示不可填写 */
+:deep(td.cell-locked) .cell-value,
+:deep(td.cell-locked) .vxe-cell {
+  cursor: not-allowed;
 }
 
 /* 非可排班日格子文字：保持黑色清晰可读 */
@@ -979,9 +1009,9 @@ onMounted(async () => {
   padding: 0 2px;
 }
 
-/* 表头整体：深色底白字，与正文区分 */
+/* 表头整体：浅蓝底（加深），与正文区分 */
 :deep(.matrix-table) .vxe-table--header-wrapper .vxe-header--column {
-  background-color: #f0f2f5;
+  background-color: #a0cfff;
   font-weight: 600;
   color: #303133;
 }
@@ -1003,5 +1033,13 @@ onMounted(async () => {
 :deep(tr.row-void) .vxe-cell {
   color: #303133;
   text-decoration: line-through;
+}
+
+/* 表格正文单元格：垂直居中（vxe-cell 默认顶对齐；水平居中由列 align="center" 的 text-align 实现，
+   保持子元素默认拉伸以维持 .cell-text 的超长省略） */
+:deep(.matrix-table) .vxe-table--body-wrapper .vxe-body--column .vxe-cell {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 </style>
