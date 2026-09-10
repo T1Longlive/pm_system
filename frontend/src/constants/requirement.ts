@@ -1,7 +1,7 @@
-// 需求状态常量：与后端状态机一一对应（terminal 标记终态，终态不可再流转）
+// 需求状态常量：与后端派生阶段一一对应（terminal 标记终态，终态不可再流转）。
+// READY（已排期）已随状态派生化重构移除：排满即 DEV，不再作为独立阶段
 export const STATUS_OPTIONS = [
   { value: 'PENDING', label: '待排期', terminal: false },
-  { value: 'READY', label: '已排期', terminal: false },
   { value: 'DEV', label: '开发中', terminal: false },
   { value: 'TEST', label: '测试中', terminal: false },
   { value: 'ARCHIVING', label: '待归档', terminal: false },
@@ -23,6 +23,7 @@ export const statusLabel = (v: string) => STATUS_OPTIONS.find((s) => s.value ===
 export const priorityLabel = (v: number) => PRIORITY_OPTIONS.find((p) => p.value === v)?.label || String(v)
 
 // 状态对应的 el-tag 颜色：未排期灰、进行中蓝/橙、已归档绿、已取消红
+// （READY 仅为历史数据兜底：启动对账后库中不再出现）
 const STATUS_TAG: Record<string, 'primary' | 'success' | 'warning' | 'info' | 'danger'> = {
   PENDING: 'info',
   READY: 'primary',

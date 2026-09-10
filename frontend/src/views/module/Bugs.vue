@@ -5,6 +5,7 @@ import type { UploadRequestOptions } from 'element-plus'
 import { VxeTable, VxeColumn } from 'vxe-table'
 import 'vxe-table/lib/style.css'
 import { useUserStore } from '@/stores/user'
+import { useRoute } from 'vue-router'
 import { listProjects, getProject, type ProjectItem, type ProjectMember } from '@/api/project'
 import {
   listBugs,
@@ -32,6 +33,11 @@ import { PRIORITY_OPTIONS, priorityLabel } from '@/constants/requirement'
 import { craftLabel } from '@/constants/craft'
 
 const userStore = useUserStore()
+// 路由（支持 query.projectId 自动选中项目，供全局搜索等外部入口使用）
+const route = useRoute()
+
+// localStorage 键：记住最后停留的项目（下次进入 Bug 页自动选中）
+const LAST_PROJECT_KEY = 'pm-bugs-last-project-id'
 
 // 当前登录用户是否全局管理员（归档/重新打开按钮判断用）
 const isAdmin = computed(() => userStore.userInfo?.isAdmin === 1)
@@ -113,12 +119,21 @@ const memberOptions = computed(() => {
   return list
 })
 
+// 当前选中的项目对象（醒目标签展示用；未选择时为 undefined）
+const currentProject = computed(() => projects.value.find((p) => p.id === projectId.value))
+
 // 切换项目：清空两个表与成员后加载（未选择项目时显示引导页；归档表懒加载）
 const handleProjectChange = () => {
   bugList.value = []
   archList.value = []
   members.value = []
-  if (projectId.value === '') return
+  if (projectId.value === '') {
+    // 清空选择：同时清除记忆，下次进入仍从引导页开始
+    localStorage.removeItem(LAST_PROJECT_KEY)
+    return
+  }
+  // 记住本次选择，下次进入自动恢复
+  localStorage.setItem(LAST_PROJECT_KEY, String(projectId.value))
   fetchBugs()
   fetchMembers()
 }
@@ -494,9 +509,19 @@ const clearVideo = async () => {
   ElMessage.success('视频已清除')
 }
 
-// 页面挂载后加载项目下拉
-onMounted(() => {
-  fetchProjects()
+// 页面挂载后加载项目下拉，并自动选中项目（外部入口 query 优先，其次恢复上次停留的项目）
+onMounted(async () => {
+  await fetchProjects()
+  const queryProject = Number(route.query.projectId)
+  const savedId = Number(localStorage.getItem(LAST_PROJECT_KEY))
+  // query 有效（如全局搜索跳入）时以 query 为准；否则用记忆的项目
+  const target = queryProject || savedId
+  if (target && projects.value.some((p) => p.id === target)) {
+    projectId.value = target
+    localStorage.setItem(LAST_PROJECT_KEY, String(target))
+    fetchBugs()
+    fetchMembers()
+  }
 })
 </script>
 
@@ -514,6 +539,16 @@ onMounted(() => {
       >
         <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
       </el-select>
+      <!-- 当前项目醒目标志：蓝底白字大号标签，避免浏览列表时忘记当前项目 -->
+      <el-tag
+        v-if="currentProject"
+        type="primary"
+        size="large"
+        effect="dark"
+        class="current-project-tag"
+      >
+        当前项目：{{ currentProject.name }}
+      </el-tag>
       <el-tooltip content="请先选择项目" :disabled="projectId !== ''">
         <span>
           <el-button type="primary" :disabled="projectId === ''" :loading="adding" @click="handleAdd">
@@ -970,6 +1005,12 @@ onMounted(() => {
 /* 项目下拉宽度 */
 .toolbar-project {
   width: 260px;
+}
+
+/* 当前项目醒目标志：加大字号并留出与相邻元素的间距 */
+.current-project-tag {
+  margin-left: 8px;
+  font-size: 14px;
 }
 
 /* 工具栏按钮推到最右 */

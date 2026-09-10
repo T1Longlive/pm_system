@@ -46,6 +46,9 @@ public class RequirementListVO {
     /** 参与人平铺列表（同一人多工种多行，前端按工种分组展示） */
     private List<ParticipantVO> participants;
 
+    /** 各工种排期日期区间（列表页进度缩略图的开发/测试节点按日期点亮用） */
+    private List<CraftScheduleVO> craftSchedules;
+
     /** 当前用户在该项目的角色：PM+工种并存时含 PM，无角色返回空数组 */
     private List<String> myRole;
 }

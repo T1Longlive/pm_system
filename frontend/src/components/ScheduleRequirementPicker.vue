@@ -3,13 +3,15 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { listRequirements, type ReqListItem } from '@/api/requirement'
 import { addRequirementToMonth } from '@/api/schedule'
-import { priorityLabel, priorityTagType } from '@/constants/requirement'
+import { priorityLabel, priorityTagType, statusLabel, statusTagType } from '@/constants/requirement'
 
 const props = defineProps<{
   // 弹窗显隐（v-model）
   modelValue: boolean
   // 目标月表 id
   monthId: number | null
+  // 当月已排的需求 id 集合（这些需求标记"已在当月"并禁选）
+  existingIds?: number[]
 }>()
 
 const emit = defineEmits<{
@@ -24,7 +26,7 @@ const visible = computed({
   set: (v: boolean) => emit('update:modelValue', v)
 })
 
-// 待排期需求列表
+// 需求池：全部未归档未取消的需求（每个需求随时可再次加入任意月表排期）
 const list = ref<ReqListItem[]>([])
 // 列表加载中
 const loading = ref(false)
@@ -33,11 +35,11 @@ const selectedId = ref<number | null>(null)
 // 提交按钮 loading
 const submitting = ref(false)
 
-// 拉取待排期需求（一次拉取一百条，超出部分一期不考虑）
+// 拉取需求池（排除终态；一次拉取一百条，超出部分一期不考虑）
 const fetchList = async () => {
   loading.value = true
   try {
-    const res = await listRequirements({ status: 'PENDING', page: 1, size: 100 })
+    const res = await listRequirements({ excludeTerminal: true, page: 1, size: 100 })
     list.value = res.data.data.records
   } catch {
     // 失败已由拦截器统一提示
@@ -57,14 +59,23 @@ watch(
   }
 )
 
-// 点击行：单选（再次点击同一行取消选择）
+// 当月已排的需求 id 集合（Set 加速判断）
+const existingSet = computed(() => new Set(props.existingIds || []))
+// 该需求是否已在当月排期表（禁选）
+const isExisting = (row: ReqListItem) => existingSet.value.has(row.id)
+
+// 点击行：单选（再次点击同一行取消选择）；已在当月的禁选并提示
 const handleRowClick = (row: ReqListItem) => {
+  if (isExisting(row)) {
+    ElMessage.warning(`「${row.title}」已在当月排期表中`)
+    return
+  }
   selectedId.value = selectedId.value === row.id ? null : row.id
 }
 
-// 行选中样式：当前选中行高亮
+// 行选中样式：当前选中行高亮；已在当月的行置灰禁选
 const rowClassName = ({ row }: { row: ReqListItem }) =>
-  row.id === selectedId.value ? 'picker-row-selected' : ''
+  row.id === selectedId.value ? 'picker-row-selected' : isExisting(row) ? 'picker-row-existing' : ''
 
 // 确认添加：调接口生成排期行，成功后关闭并通知父页面
 const handleSubmit = async () => {
@@ -98,7 +109,7 @@ const handleSubmit = async () => {
     >
       <el-table-column label="" width="46" align="center">
         <template #default="{ row }">
-          <el-radio :model-value="selectedId" :value="row.id" />
+          <el-radio :model-value="selectedId" :value="row.id" :disabled="isExisting(row)" />
         </template>
       </el-table-column>
       <el-table-column label="需求编号" width="150">
@@ -106,8 +117,21 @@ const handleSubmit = async () => {
           <span class="req-no">{{ row.reqNo }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="title" label="需求名称" min-width="200" show-overflow-tooltip />
-      <el-table-column prop="projectName" label="所属项目" width="140" show-overflow-tooltip />
+      <el-table-column prop="title" label="需求名称" min-width="180" show-overflow-tooltip />
+      <el-table-column label="状态" width="84" align="center">
+        <template #default="{ row }">
+          <el-tag size="small" :type="statusTagType(row.status)">
+            {{ statusLabel(row.status) }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="当月" width="76" align="center">
+        <template #default="{ row }">
+          <el-tag v-if="isExisting(row)" size="small" type="info">已在当月</el-tag>
+          <span v-else class="pickable-mark">可添加</span>
+        </template>
+      </el-table-column>
+      <el-table-column prop="projectName" label="所属项目" width="130" show-overflow-tooltip />
       <el-table-column label="优先级" width="76" align="center">
         <template #default="{ row }">
           <el-tag size="small" :type="priorityTagType(row.priority)">
@@ -154,6 +178,22 @@ const handleSubmit = async () => {
 
 :deep(.picker-table .picker-row-selected:hover > td) {
   background-color: #ecf5ff;
+}
+
+/* 已在当月的行：置灰 + 禁止光标 */
+:deep(.picker-table .picker-row-existing) {
+  color: #b0b6bf;
+  cursor: not-allowed;
+}
+
+:deep(.picker-table .picker-row-existing:hover > td) {
+  background-color: #fafafa;
+}
+
+/* "可添加"文案：弱化显示 */
+.pickable-mark {
+  font-size: 12px;
+  color: #b0b6bf;
 }
 
 /* 单选 radio 隐藏默认文案，仅保留圆点 */

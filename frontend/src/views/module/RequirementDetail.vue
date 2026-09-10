@@ -108,6 +108,11 @@ const goProject = () => {
   if (detail.value) router.push(`/projects/${detail.value.projectId}`)
 }
 
+// 跳转排期管理页
+const goSchedule = () => {
+  router.push('/schedule')
+}
+
 // 附件点击：新窗口打开
 const openFile = (url: string) => {
   window.open(url, '_blank')
@@ -193,6 +198,7 @@ onMounted(() => {
       <span class="req-no">{{ detail?.reqNo }}</span>
       <span class="req-title" :title="detail?.title">{{ detail?.title }}</span>
       <div class="toolbar-actions">
+        <el-button type="success" plain @click="goSchedule">排期管理</el-button>
         <el-button v-if="canEdit" type="primary" @click="openEdit">编辑</el-button>
         <el-button v-if="canCancel" type="danger" plain @click="handleCancel">取消需求</el-button>
         <el-button v-if="canArchive" type="warning" plain @click="handleArchive">归档</el-button>

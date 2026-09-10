@@ -61,29 +61,29 @@ const LINE_CURRENT = '#f7ba1e' // 高亮黄（进行中）
 const LINE_DONE = '#34c724' // 飞书成功绿
 const LINE_W = 2.5
 
-// 连接器组件：给定若干条 path 的 d 字符串，绘制细连线
+// 连接器组件：给定若干条 path 的 d 字符串与对应状态（逐条线独立着色），绘制细连线
 // 注意：此组件经 h() 动态渲染，scoped 样式作用域不会落到 path 上，故描边/填充需用 SVG 表现属性直接给定
 const CConn = defineComponent({
   props: {
     paths: { type: Array, default: () => [] },
-    state: { type: String, default: 'off' }, // 'off' | 'current' | 'done'
+    states: { type: Array, default: () => [] }, // 每条线一个 'off' | 'current' | 'done'
     hg: { type: Number, required: true }
   },
   setup(props) {
     return () =>
       h('div', { class: 'conn', style: { height: props.hg + 'px' } },
         h('svg', { class: 'csvg', width: CONN_W, height: props.hg, style: { display: 'block' } },
-          props.paths.map((d) =>
-            h('path', {
+          props.paths.map((d, idx) => {
+            const s = props.states[idx] || 'off'
+            return h('path', {
               d,
               fill: 'none',
-              stroke:
-                props.state === 'done' ? LINE_DONE : props.state === 'current' ? LINE_CURRENT : LINE_OFF,
+              stroke: s === 'done' ? LINE_DONE : s === 'current' ? LINE_CURRENT : LINE_OFF,
               'stroke-width': LINE_W,
               'stroke-linecap': 'round',
               'stroke-linejoin': 'round'
             })
-          )
+          })
         )
       )
   }
@@ -152,9 +152,30 @@ const isDone = (i: number) => stageState(i) === 'done'
 const isCurrent = (i: number) => stageState(i) === 'current'
 const nodeCls = (i: number) => ({ done: isDone(i), current: isCurrent(i), future: stageState(i) === 'future' })
 
-// 连线是否点亮（进入阶段 k 的线由「目标节点」状态决定：已完成→绿 / 进行中→黄 / 未开始→灰）
+// 连线状态规则（按两端节点状态查表，取"较高"者：灰 > 绿 > 黄）：
+// 任一端未开始（灰）→ 灰（灰色连任意颜色都灰）；无灰时任一端完成（绿）→ 绿（绿连绿、绿连黄都绿）；两端都进行中（黄）→ 黄
 type SegState = 'off' | 'current' | 'done'
-const segState = (k: number): SegState => (isDone(k) ? 'done' : isCurrent(k) ? 'current' : 'off')
+const linkState = (a: SegState, b: SegState): SegState => {
+  if (a === 'off' || b === 'off') return 'off'
+  if (a === 'done' || b === 'done') return 'done'
+  return 'current'
+}
+// 主干阶段 i 节点状态 → 连线状态
+const stageSeg = (i: number): SegState => {
+  const s = stageState(i)
+  return s === 'done' ? 'done' : s === 'current' ? 'current' : 'off'
+}
+// 工种分支卡状态 → 连线状态
+const cardSeg = (craft: string): SegState => {
+  const s = craftState(craft)
+  return s === 'done' ? 'done' : s === 'active' ? 'current' : 'off'
+}
+// mini 连线类名：与 full 图同规则（两端节点状态取"较高"者：灰 > 绿 > 黄）
+const miniLineCls = (i: number): string => {
+  const seg = (k: number): SegState => (isDone(k) ? 'done' : isCurrent(k) ? 'current' : 'off')
+  const s = linkState(seg(i), seg(i + 1))
+  return s === 'done' ? 'done' : s === 'current' ? 'current' : ''
+}
 
 // ===== 分支列数据 =====
 // 开发分支：按工种分组（仅含有参与人的工种）
@@ -203,36 +224,55 @@ const craftDone = (craft: string) => craftState(craft) === 'done'
 const plannerParticipants = computed(() => props.participants.filter((p) => p.craft === 'PLANNER'))
 
 // ===== 连接器数据（5 段，顺序 = 模板渲染顺序）=====
-type ConnD = { paths: string[]; state: SegState }
+type ConnD = { paths: string[]; states: SegState[] }
 
 const connectors = computed(() => {
   const dev = devBranches.value.length > 0
   const qa = qaBranches.value.length > 0
   const ax = axisY.value
 
-  // a: 待排期 → 待开始（串行直线）
-  const a: ConnD = { paths: smoothConnect([ax], [ax]), state: segState(1) }
-  // b: 待开始 → 开发（无分支串行 / 有分支扇出到各工种）
+  // a: 待排期 → 待开始（串行直线；按两端状态查表）
+  const a: ConnD = {
+    paths: smoothConnect([ax], [ax]),
+    states: [linkState(stageSeg(0), stageSeg(1))]
+  }
+  // b: 待开始 → 开发（扇出到各工种卡：每条线按「排期节点 vs 该卡片」查表；无分支则对 DEV 单节点）
   const b: ConnD = dev
-    ? { paths: smoothConnect([ax], devCenters.value), state: segState(2) }
-    : { paths: smoothConnect([ax], [ax]), state: segState(2) }
-  // c: 开发 → 测试
+    ? {
+        paths: smoothConnect([ax], devCenters.value),
+        states: devBranches.value.map((br) => linkState(stageSeg(1), cardSeg(br.craft)))
+      }
+    : { paths: smoothConnect([ax], [ax]), states: [linkState(stageSeg(1), stageSeg(2))] }
+  // c: 开发 → 测试（每个开发卡各自汇聚：按「该开发卡 vs 测试端」查表）
   let c: ConnD
   if (dev) {
-    // 开发各分支汇聚到测试（QA 有卡则入卡中心；无 QA 则入 Test 单节点轴）
+    // 开发各分支汇聚到测试（QA 有卡则入第一张卡中心；无 QA 则入 Test 单节点轴）
     const dst = qa ? qaCenters.value[0] : ax
-    c = { paths: smoothConnect(devCenters.value, [dst]), state: segState(3) }
+    const testSeg: SegState = qa ? cardSeg(qaBranches.value[0].craft) : stageSeg(3)
+    c = {
+      paths: smoothConnect(devCenters.value, [dst]),
+      states: devBranches.value.map((br) => linkState(cardSeg(br.craft), testSeg))
+    }
   } else if (qa) {
-    c = { paths: smoothConnect([ax], qaCenters.value), state: segState(3) }
+    c = {
+      paths: smoothConnect([ax], qaCenters.value),
+      states: qaBranches.value.map((br) => linkState(stageSeg(2), cardSeg(br.craft)))
+    }
   } else {
-    c = { paths: smoothConnect([ax], [ax]), state: segState(3) }
+    c = { paths: smoothConnect([ax], [ax]), states: [linkState(stageSeg(2), stageSeg(3))] }
   }
-  // d: 测试 → 待归档（QA 有卡则汇聚，否则串行直线）
+  // d: 测试 → 待归档（QA 卡汇聚：按「该 QA 卡 vs 归档节点」查表）
   const d: ConnD = qa
-    ? { paths: smoothConnect(qaCenters.value, [ax]), state: segState(4) }
-    : { paths: smoothConnect([ax], [ax]), state: segState(4) }
-  // e: 待归档 → 已归档（串行直线）
-  const e: ConnD = { paths: smoothConnect([ax], [ax]), state: segState(5) }
+    ? {
+        paths: smoothConnect(qaCenters.value, [ax]),
+        states: qaBranches.value.map((br) => linkState(cardSeg(br.craft), stageSeg(4)))
+      }
+    : { paths: smoothConnect([ax], [ax]), states: [linkState(stageSeg(3), stageSeg(4))] }
+  // e: 待归档 → 已归档（串行直线；按两端状态查表）
+  const e: ConnD = {
+    paths: smoothConnect([ax], [ax]),
+    states: [linkState(stageSeg(4), stageSeg(5))]
+  }
   return { a, b, c, d, e }
 })
 
@@ -256,10 +296,11 @@ onMounted(async () => {
   <div v-if="size === 'mini'" class="steps-mini">
     <template v-for="(node, i) in STEP_STATUS" :key="node">
       <span class="mini-dot" :class="{ done: isDone(i), current: isCurrent(i) }" />
+      <!-- 连线与 full 图同规则：两端圆点状态取低者（灰 > 黄 > 绿） -->
       <span
         v-if="i < STEP_STATUS.length - 1"
         class="mini-line"
-        :class="{ done: isDone(i + 1), current: isCurrent(i + 1) }"
+        :class="miniLineCls(i)"
       />
     </template>
     <!-- 已取消：尾部红色标记 -->
@@ -291,7 +332,7 @@ onMounted(async () => {
       </div>
     </div>
 
-    <CConn :paths="connectors.a.paths" :state="connectors.a.state" :hg="rowH" />
+    <CConn :paths="connectors.a.paths" :states="connectors.a.states" :hg="rowH" />
 
     <!-- 待开始（PM） -->
     <div class="tnode">
@@ -309,7 +350,7 @@ onMounted(async () => {
       </div>
     </div>
 
-    <CConn :paths="connectors.b.paths" :state="connectors.b.state" :hg="rowH" />
+    <CConn :paths="connectors.b.paths" :states="connectors.b.states" :hg="rowH" />
 
     <!-- ===== 开发阶段 ===== -->
     <template v-if="devBranches.length">
@@ -347,7 +388,7 @@ onMounted(async () => {
       </div>
     </template>
 
-    <CConn :paths="connectors.c.paths" :state="connectors.c.state" :hg="rowH" />
+    <CConn :paths="connectors.c.paths" :states="connectors.c.states" :hg="rowH" />
 
     <!-- ===== 测试阶段 ===== -->
     <template v-if="qaBranches.length">
@@ -385,7 +426,7 @@ onMounted(async () => {
       </div>
     </template>
 
-    <CConn :paths="connectors.d.paths" :state="connectors.d.state" :hg="rowH" />
+    <CConn :paths="connectors.d.paths" :states="connectors.d.states" :hg="rowH" />
 
     <!-- 待归档（PM） -->
     <div class="tnode">
@@ -403,7 +444,7 @@ onMounted(async () => {
       </div>
     </div>
 
-    <CConn :paths="connectors.e.paths" :state="connectors.e.state" :hg="rowH" />
+    <CConn :paths="connectors.e.paths" :states="connectors.e.states" :hg="rowH" />
 
     <!-- 已归档 -->
     <div class="tnode">

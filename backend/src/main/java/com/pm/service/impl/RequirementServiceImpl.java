@@ -1,6 +1,7 @@
 package com.pm.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.pm.common.BizException;
 import com.pm.common.CraftConstants;
@@ -16,6 +17,7 @@ import com.pm.entity.Project;
 import com.pm.entity.ProjectMember;
 import com.pm.entity.Requirement;
 import com.pm.entity.RequirementParticipant;
+import com.pm.entity.ScheduleRow;
 import com.pm.entity.User;
 import com.pm.mapper.AttachmentMapper;
 import com.pm.mapper.BizOperationLogMapper;
@@ -27,12 +29,16 @@ import com.pm.mapper.ScheduleRowMapper;
 import com.pm.mapper.UserMapper;
 import com.pm.service.NotificationService;
 import com.pm.service.RequirementService;
+import com.pm.service.RequirementStageService;
 import com.pm.vo.AttachmentVO;
+import com.pm.vo.CraftScheduleBatchVO;
+import com.pm.vo.CraftScheduleVO;
 import com.pm.vo.OperationLogVO;
 import com.pm.vo.ParticipantVO;
 import com.pm.vo.RequirementDetailVO;
 import com.pm.vo.RequirementListVO;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -41,6 +47,7 @@ import org.springframework.util.StringUtils;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -51,8 +58,9 @@ import java.util.stream.Collectors;
 
 /**
  * 需求管理服务实现
- * 排期相关状态流转（保存触发 PENDING→READY、节点完成触发 DEV→TEST/TEST→ARCHIVING、定时任务 READY→DEV）
- * 已由排期模块 ScheduleServiceImpl 实现；参与人变更自动同步排期行见 applyParticipantDiff 中的 TODO（本期不做联动）
+ * 需求状态为派生值（排期数据+日期 → stage 纯函数），本服务仅直写两个人工决定：取消/归档（终态不参与派生）；
+ * 其余状态流转由排期写路径与定时任务经 RequirementStageService.syncStage 统一对账；
+ * 参与人变更联动排期行见 applyParticipantDiff：新增 → 在已有排期的月份补生成排期行；移除 → 排期行标 VOID
  */
 @Service
 @RequiredArgsConstructor
@@ -76,9 +84,14 @@ public class RequirementServiceImpl implements RequirementService {
     /** 状态：已取消（终态） */
     private static final String STATUS_CANCELLED = "CANCELLED";
 
-    /** 全部合法状态（列表筛选参数校验用） */
+    /** 全部合法状态（列表筛选参数校验用；READY 为派生化前的历史值，仅保留兼容校验） */
     private static final Set<String> ALL_STATUSES = Set.of(STATUS_PENDING, STATUS_READY, STATUS_DEV,
             STATUS_TEST, STATUS_ARCHIVING, STATUS_ARCHIVED, STATUS_CANCELLED);
+
+    /** 排期行状态：待开始 */
+    private static final String ROW_STATUS_TODO = "TODO";
+    /** 排期行状态：作废（参与人移除） */
+    private static final String ROW_STATUS_VOID = "VOID";
 
     /** 留痕/附件/通知使用的业务类型 */
     private static final String BIZ_TYPE = "REQUIREMENT";
@@ -100,11 +113,13 @@ public class RequirementServiceImpl implements RequirementService {
     private final AttachmentMapper attachmentMapper;
     private final BizOperationLogMapper operationLogMapper;
     private final NotificationService notificationService;
+    private final RequirementStageService stageSyncService;
     private final StringRedisTemplate stringRedisTemplate;
 
     @Override
     public Page<RequirementListVO> pageRequirements(Long userId, Long projectId, String status, Integer priority,
-                                                    Long plannerId, String keyword, long page, long size) {
+                                                    Long plannerId, String keyword, boolean excludeTerminal,
+                                                    long page, long size) {
         // 筛选参数合法性校验
         if (StringUtils.hasText(status) && !ALL_STATUSES.contains(status)) {
             throw new BizException(400, "非法需求状态：" + status);
@@ -116,6 +131,10 @@ public class RequirementServiceImpl implements RequirementService {
         // projectId 空 = 全部项目（全局汇总视图，任何登录用户可见，不按成员身份过滤）
         wrapper.eq(projectId != null, Requirement::getProjectId, projectId);
         wrapper.eq(StringUtils.hasText(status), Requirement::getStatus, status);
+        // 排除终态（需求池：未归档未取消的需求一直可选）
+        if (excludeTerminal) {
+            wrapper.notIn(Requirement::getStatus, "ARCHIVED", "CANCELLED");
+        }
         wrapper.eq(priority != null, Requirement::getPriority, priority);
         wrapper.eq(plannerId != null, Requirement::getPlannerId, plannerId);
         if (StringUtils.hasText(keyword)) {
@@ -165,6 +184,16 @@ public class RequirementServiceImpl implements RequirementService {
                 .stream().collect(Collectors.groupingBy(ProjectMember::getProjectId,
                         Collectors.mapping(ProjectMember::getCraft, Collectors.toList())));
 
+        // 批量查各工种排期日期区间（进度缩略图的开发/测试节点按日期点亮用），按需求分组
+        Map<Long, List<CraftScheduleVO>> schedulesByReq = new HashMap<>();
+        for (CraftScheduleBatchVO b : scheduleRowMapper.selectCraftDateRangeBatch(reqIds)) {
+            CraftScheduleVO vo = new CraftScheduleVO();
+            vo.setCraft(b.getCraft());
+            vo.setStartDate(b.getStartDate());
+            vo.setEndDate(b.getEndDate());
+            schedulesByReq.computeIfAbsent(b.getRequirementId(), k -> new ArrayList<>()).add(vo);
+        }
+
         List<RequirementListVO> records = new ArrayList<>();
         for (Requirement req : requirements) {
             RequirementListVO vo = new RequirementListVO();
@@ -183,6 +212,7 @@ public class RequirementServiceImpl implements RequirementService {
             vo.setCreatedAt(req.getCreatedAt());
             vo.setUpdatedAt(toMillis(req.getUpdatedAt()));
             vo.setParticipants(toParticipantVOs(participantsByReq.getOrDefault(req.getId(), List.of()), nameMap));
+            vo.setCraftSchedules(schedulesByReq.getOrDefault(req.getId(), List.of()));
             vo.setMyRole(buildMyRole(project, userId, myCraftsMap.get(req.getProjectId())));
             records.add(vo);
         }
@@ -506,6 +536,33 @@ public class RequirementServiceImpl implements RequirementService {
         }
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int removeParticipantByProjectMember(Long projectId, Long targetUserId, String craft, Long operatorId) {
+        // 该项目下全部非终态需求（终态历史冻结：已归档/已取消不联动）
+        List<Requirement> reqs = requirementMapper.selectList(new LambdaQueryWrapper<Requirement>()
+                .eq(Requirement::getProjectId, projectId)
+                .notIn(Requirement::getStatus, List.of(STATUS_ARCHIVED, STATUS_CANCELLED)));
+        int affected = 0;
+        for (Requirement req : reqs) {
+            LambdaQueryWrapper<RequirementParticipant> qw = new LambdaQueryWrapper<RequirementParticipant>()
+                    .eq(RequirementParticipant::getRequirementId, req.getId())
+                    .eq(RequirementParticipant::getUserId, targetUserId);
+            if (craft != null) {
+                // 按工种移除：仅联动该工种的参与身份（用户可能以其他工种仍是项目成员）
+                qw.eq(RequirementParticipant::getCraft, craft);
+            }
+            List<RequirementParticipant> removed = participantMapper.selectList(qw);
+            if (removed.isEmpty()) {
+                continue;
+            }
+            // 复用参与人 diff 落库：删参与行 + 排期行标 VOID（跨全部月份）+ 通知本人 + syncStage 对账
+            applyParticipantDiff(req.getId(), operatorId, req.getTitle(), List.of(), removed);
+            affected++;
+        }
+        return affected;
+    }
+
     // ==================== 编号生成 ====================
 
     /**
@@ -618,10 +675,10 @@ public class RequirementServiceImpl implements RequirementService {
     }
 
     /**
-     * 参与人 diff 落库 + 通知：新增行插入并通知被添加人，移除行删除并通知被移除人。
-     * TODO 参与人变更自动同步排期（需求文档 5.4.5，本期不做，后续在排期模块接入）：
-     * - 新增参与人：在该需求所有已有排期行的月表中追加对应新行（未排状态）
-     * - 移除参与人：其未完成（未点完成）的排期行作废标记 status=VOID（灰色删除线显示，不物理删除）；已完成的行保留
+     * 参与人变更落库 + 排期行联动（状态派生化）：
+     * 新增参与人 → 在该需求已有排期行的所有月份补生成排期行（新组工期为空，自然未排满）；
+     * 移除参与人 → 其全部排期行（跨全部月份）标 VOID（统计 SQL 均排除 VOID，自动从排满/已排/日期判定剔除）；
+     * 联动完成后按排期数据对账需求状态（新增组未排满 → 自动回退待排期）
      */
     private void applyParticipantDiff(Long requirementId, Long operatorId, String title,
                                       List<ParticipantDTO> added, List<RequirementParticipant> removed) {
@@ -631,6 +688,8 @@ public class RequirementServiceImpl implements RequirementService {
             row.setUserId(p.getUserId());
             row.setCraft(p.getCraft());
             participantMapper.insert(row);
+            // 排期行联动：在该需求已有排期行的所有月份补生成该参与人的排期行
+            syncParticipantScheduleRows(requirementId, p);
             notificationService.send(p.getUserId(), NotifyTypes.REQ_PARTICIPANT_ADDED,
                     "添加为需求参与人",
                     "您被添加为需求「" + title + "」的参与人（" + craftName(p.getCraft()) + "）",
@@ -638,10 +697,66 @@ public class RequirementServiceImpl implements RequirementService {
         }
         for (RequirementParticipant row : removed) {
             participantMapper.deleteById(row.getId());
+            // 排期行联动：该参与人的全部排期行（跨全部月份）标 VOID（保留行与格子作历史，不参与统计）
+            scheduleRowMapper.update(null, new LambdaUpdateWrapper<ScheduleRow>()
+                    .eq(ScheduleRow::getRequirementId, requirementId)
+                    .eq(ScheduleRow::getCraft, row.getCraft())
+                    .eq(ScheduleRow::getUserId, row.getUserId())
+                    .set(ScheduleRow::getStatus, ROW_STATUS_VOID));
             notificationService.send(row.getUserId(), NotifyTypes.REQ_PARTICIPANT_REMOVED,
                     "移出需求参与人",
                     "您被移出需求「" + title + "」的参与人（" + craftName(row.getCraft()) + "）",
                     BIZ_TYPE, requirementId);
+        }
+        // 排期行集合已变化：需求状态按「排期数据+日期」派生对账，统一收口
+        stageSyncService.syncStage(requirementId, operatorId);
+    }
+
+    /**
+     * 参与人新增的排期行联动：在该需求已有排期行的所有月份补生成排期行（工期为空=待排期）。
+     * 处理三种情况：该月已有同键 TODO 行 → 跳过；已有 VOID 行（曾移除又加回）→ 复活为 TODO；
+     * 无行 → 新插入（seq 沿用该需求在该月的展示序号，同需求同月共享）
+     */
+    private void syncParticipantScheduleRows(Long requirementId, ParticipantDTO p) {
+        // 该需求出现的全部月份及各月展示序号
+        Map<Long, Integer> monthSeq = new LinkedHashMap<>();
+        for (ScheduleRow r : scheduleRowMapper.selectList(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getRequirementId, requirementId)
+                .orderByAsc(ScheduleRow::getMonthId))) {
+            monthSeq.putIfAbsent(r.getMonthId(), r.getSeq());
+        }
+        if (monthSeq.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<Long, Integer> entry : monthSeq.entrySet()) {
+            ScheduleRow existing = scheduleRowMapper.selectOne(new LambdaQueryWrapper<ScheduleRow>()
+                    .eq(ScheduleRow::getMonthId, entry.getKey())
+                    .eq(ScheduleRow::getRequirementId, requirementId)
+                    .eq(ScheduleRow::getCraft, p.getCraft())
+                    .eq(ScheduleRow::getUserId, p.getUserId())
+                    .last("LIMIT 1"));
+            if (existing != null) {
+                // 曾被移除（VOID）又重新加回：复活为待开始；仍在排期中则跳过
+                if (ROW_STATUS_VOID.equals(existing.getStatus())) {
+                    scheduleRowMapper.update(null, new LambdaUpdateWrapper<ScheduleRow>()
+                            .eq(ScheduleRow::getId, existing.getId())
+                            .set(ScheduleRow::getStatus, ROW_STATUS_TODO));
+                }
+                continue;
+            }
+            ScheduleRow row = new ScheduleRow();
+            row.setMonthId(entry.getKey());
+            row.setRequirementId(requirementId);
+            row.setCraft(p.getCraft());
+            row.setUserId(p.getUserId());
+            row.setSeq(entry.getValue() != null ? entry.getValue() : 1);
+            row.setStatus(ROW_STATUS_TODO);
+            row.setIsOverflow(0);
+            try {
+                scheduleRowMapper.insert(row);
+            } catch (DuplicateKeyException e) {
+                // uk_month_req_craft_user 并发兜底：已存在同键行视为已生成
+            }
         }
     }
 

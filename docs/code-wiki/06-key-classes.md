@@ -55,9 +55,9 @@
 | `createMonth` | 管理员或任意项目 PM | 年月唯一（400「该月排期表已存在」） |
 | `addRequirement` | 该需求项目的 PM | 需求必须 PENDING；同需求同月只生成一次；按 `requirement_participant` 逐行生成（一行=工种×负责人，status=TODO），`seq = 当月需求数+1`；**需求保持 PENDING**；返回行数（参与人为空返回 0） |
 | `saveRow` | 该项目 PM | 见下方六步详解 |
-| `copyRow` | 该项目 PM | 手动「添加到下月」：复制行带原工期至下月表（不存在自动创建、跨年进位），幂等（下月已有同键行不插） |
-| `getMonthView` | 登录 | 月信息 + 整月日历（灰显依据）+ 当月全部行（含 VOID）按「工种+id」排序 → 按需求分组（GroupVO），groups 按 seq 升序；列全部 JOIN 派生不冗余存储 |
-| `advanceBySchedule` | 定时任务调用 | ① READY 且全部行排满 → DEV（**排满即时推进在 saveRow 完成并通知，此处兜底存量，不通知**）；② DEV 且全部非 QA 行格子日 < today → TEST（通知）；③ TEST 且全部行格子日 < today → ARCHIVING（通知） |
+| `copyRequirementToNextMonth` | 该项目 PM | **整个需求添加到下月**：该需求全部排期组（工种×负责人，跨全部月份去重）逐组插入下月新行（格子空白、工期带原值跨月共用，TODO）；下月表不存在自动创建（跨年进位）；幂等（下月已有同组行跳过）；返回 {monthId, duplicated, insertedCount} |
+| `getMonthView` | 登录 | 月信息 + 整月日历（灰显依据）+ 当月全部行（含 VOID）按「工种+id」排序 → 按需求分组（GroupVO），groups 按 seq 升序；每行附 `scheduledSum`（排期组跨全部月份格子之和，前端「已排」列与状态派生用）；列全部 JOIN 派生不冗余存储 |
+| `advanceBySchedule` | 定时任务调用 | ① PENDING 且全部排期组跨月排满 → READY（兜底存量，通知）；② READY 且全部排期组跨月排满 → DEV（**排满即时推进在 saveRow 完成并通知，此处兜底存量，不通知**）；③ DEV 且全部非 QA 行格子日 < today → TEST（通知）；④ TEST 且全部行格子日 < today → ARCHIVING（通知） |
 
 ### `saveRow` 六步详解（格子保存核心）
 
@@ -65,8 +65,8 @@
 2. **格子校验 `checkAndNormalizeCells`**：日期可解析且属于本月；必须可排班日（否则「X日为非工作日」）；单格 `0 < v ≤ 1` 且为 0.1 整数倍（BigDecimal：`v×10` 与最近整数差 ≤1e-8），规范化一位小数落库。
 3. **同人同日限额 `checkUserDayTotal`**：SQL 统计该用户该日除本行外全部非 VOID 行格子合计，`day` 为绝对日期天然跨月对齐，合计 ≤1 否则 400。
 4. **落库**：**全量替换**该行格子（先 delete 后逐格 insert，空 map=清空）；LambdaUpdateWrapper 更新 plannedEffort（null=清空）并显式推进 updated_at。
-5. **跨月顺延 `checkAndCreateOverflow`**：条件 = plannedEffort 非空 且 当月格子合计 < 计划工期 且 当月剩余可排工作日为 0 → 下月表不存在则自动创建（跨年进位）→ 幂等检查（下月已有同需求+工种+负责人行不插）→ 插入 `is_overflow=1` 顺延行（planned_effort=剩余工期，格子空白）→ 通知负责人 `SCHEDULE_OVERFLOW`；返回 OverflowVO{year, month, carriedEffort}。
-6. **排满即时推进与通知**：`countNotFullRows==0`（全部非 VOID 行有工期且格子合计≥工期，跨全部月份）→ 依次条件更新 `advanceStatus(PENDING→READY)`、`advanceStatus(READY→DEV)`（**连跳**，「已排期」节点即时完成；各自写 SCHEDULE_SAVE 日志并通知参与人；eq status 防并发，如期间被取消则不推进）；格子与库中比对（compareTo 忽略精度）有实际变化 → 通知行负责人 `SCHEDULE_CHANGED`；返回新 updatedAt + overflow。
+5. **跨月顺延 `checkAndCreateOverflow`**：条件 = plannedEffort 非空 且 **组内跨月已排合计**（其他月份 + 本月新格子）< 计划工期 且 当月剩余可排工作日为 0 → 下月表不存在则自动创建（跨年进位）→ 幂等检查（下月已有同需求+工种+负责人行不插）→ 插入 `is_overflow=1` 顺延行（**planned_effort=原工期，工期跨月共用**，格子空白）→ 通知负责人 `SCHEDULE_OVERFLOW`；返回 OverflowVO{year, month, carriedEffort=剩余工期}。
+6. **排满即时推进与通知**：`countNotFullRows==0`（全部排期组：每组有工期且**组内跨全部月份格子之和 ≥ 工期**）→ 依次条件更新 `advanceStatus(PENDING→READY)`、`advanceStatus(READY→DEV)`（**连跳**，「已排期」节点即时完成；各自写 SCHEDULE_SAVE 日志并通知参与人；eq status 防并发，如期间被取消则不推进）；**保存工期同步全组**（同需求×工种×负责人的其他月份行 planned_effort 一并更新，不动其乐观锁版本）；格子与库中比对（compareTo 忽略精度）有实际变化 → 通知行负责人 `SCHEDULE_CHANGED`；返回新 updatedAt + overflow。
 
 ## 5. 其他 Service 要点
 

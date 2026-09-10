@@ -36,7 +36,8 @@ public class RequirementController {
 
     /**
      * 需求分页列表：projectId 空=全部项目（全局汇总视图）；
-     * status/priority/plannerId 精确过滤；keyword 模糊匹配标题或编号
+     * status/priority/plannerId 精确过滤；keyword 模糊匹配标题或编号；
+     * excludeTerminal=true 排除终态（ARCHIVED/CANCELLED，需求池场景）
      */
     @GetMapping
     public Result<Page<RequirementListVO>> page(@RequestParam(required = false) Long projectId,
@@ -44,12 +45,13 @@ public class RequirementController {
                                                 @RequestParam(required = false) Integer priority,
                                                 @RequestParam(required = false) Long plannerId,
                                                 @RequestParam(required = false) String keyword,
+                                                @RequestParam(defaultValue = "false") boolean excludeTerminal,
                                                 @RequestParam(defaultValue = "1") long page,
                                                 @RequestParam(defaultValue = "10") long size,
                                                 HttpServletRequest request) {
         Long userId = (Long) request.getAttribute("userId");
         return Result.success(requirementService.pageRequirements(userId, projectId, status, priority,
-                plannerId, keyword, page, size));
+                plannerId, keyword, excludeTerminal, page, size));
     }
 
     /**

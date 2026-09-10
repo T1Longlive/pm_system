@@ -74,10 +74,10 @@
 |------|------|------|------|
 | GET | `/api/schedule/months` | 登录 | 月表列表（按年月升序） |
 | POST | `/api/schedule/months` | 管理员或任意项目 PM | 创建月度排期表（`ScheduleMonthCreateDTO`），同年月唯一，已存在 400 |
-| GET | `/api/schedule/months/{monthId}/view` | 登录 | 排期视图（`ScheduleViewVO`：月份 + 整月日历（控制列灰显）+ 按需求分组的排期矩阵行；VOID 行也返回供前端灰显） |
+| GET | `/api/schedule/months/{monthId}/view` | 登录 | 排期视图（`ScheduleViewVO`：月份 + 整月日历（控制列灰显）+ 按需求分组的排期矩阵行，每行含跨月已排合计 scheduledSum；VOID 行也返回供前端灰显） |
 | POST | `/api/schedule/months/{monthId}/requirements` | 该需求项目的 PM | 将需求加入月表（`ScheduleRequirementDTO`）。需求必须 PENDING；同需求同月只生成一次；按参与人逐行生成排期行，返回生成行数 |
-| PUT | `/api/schedule/rows/{rowId}` | 该项目 PM | 保存排期行（`ScheduleRowSaveDTO`：cells 整行替换 + plannedEffort + updatedAt 乐观锁）。返回新 updatedAt 与跨月顺延信息 |
-| POST | `/api/schedule/rows/{rowId}/done` | 行负责人本人或项目 PM | 完成排期节点（仅 TODO）。事务内推进需求状态，返回推进后的需求状态 |
+| PUT | `/api/schedule/rows/{rowId}` | 该项目 PM | 保存排期行（`ScheduleRowSaveDTO`：cells 整行替换 + plannedEffort + updatedAt 乐观锁；工期同步全组）。返回新 updatedAt 与跨月顺延信息 |
+| POST | `/api/schedule/rows/{rowId}/to-next-month` | 该项目 PM | **整个需求添加到下月**：该需求全部排期组（工种×负责人）逐组插入下月新行（格子空白、工期跨月共用）；幂等；返回 {monthId, duplicated, insertedCount} |
 
 服务：`ScheduleServiceImpl` —— 全系统规则最复杂的模块（格子校验、同人同日限额、跨月顺延、状态推进），详见 [06-key-classes.md](06-key-classes.md)。
 

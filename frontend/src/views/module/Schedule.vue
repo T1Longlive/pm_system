@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, h, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 // vxe-table 局部引入：仅本页使用，不做全局注册
 import { VxeTable, VxeColumn } from 'vxe-table'
@@ -13,10 +13,13 @@ import {
   createScheduleMonth,
   getScheduleMonthView,
   saveScheduleRow,
-  copyScheduleRowToNextMonth,
+  copyRequirementToNextMonth,
+  removeRequirementFromMonth,
+  listIncompleteRequirements,
   type ScheduleMonth,
   type ScheduleView,
-  type ScheduleRowData
+  type ScheduleRowData,
+  type IncompleteRequirement
 } from '@/api/schedule'
 import type { CalendarDayData, CalendarDayType } from '@/api/calendar'
 import { craftLabel } from '@/constants/craft'
@@ -66,6 +69,7 @@ interface FlatRow {
   projectName: string
   plannerName: string | null
   priority: 1 | 2 | 3
+  reqStatus: string
   row: ScheduleRowData
 }
 
@@ -82,6 +86,7 @@ const flatRows = computed<FlatRow[]>(() => {
       projectName: g.projectName,
       plannerName: g.plannerName,
       priority: g.priority,
+      reqStatus: g.reqStatus,
       row: r
     }))
   )
@@ -137,9 +142,10 @@ const headerTitle = (d: CalendarDayData) =>
   `${d.day} 星期${weekdayLabel(d.day)} · ${DAY_TYPE_LABELS[d.type]}${d.name ? `（${d.name}）` : ''}`
 
 // ===== 行 / 单元格样式 =====
-// 行样式：作废行删除线灰显
+// 行样式：作废行删除线灰显；已归档需求的行禁止光标（排期只读）
 const rowClassName: VxeTablePropTypes.RowClassName<FlatRow> = ({ row }) => {
   if (row.row.status === 'VOID') return 'row-void'
+  if (row.reqStatus === 'ARCHIVED') return 'row-archived'
   return ''
 }
 
@@ -160,8 +166,9 @@ const headerCellClassName: VxeTablePropTypes.HeaderCellClassName = ({ column }) 
 }
 
 // ===== 单元格编辑 =====
-// 当前行格子是否可编辑：非作废行随时可编辑 + 本人是该项目 PM
-const cellEditable = (row: FlatRow) => row.row.status !== 'VOID' && isPmOf(row.projectId)
+// 当前行格子是否可编辑：非作废行随时可编辑 + 本人是该项目 PM + 需求未归档（已归档排期只读）
+const cellEditable = (row: FlatRow) =>
+  row.row.status !== 'VOID' && isPmOf(row.projectId) && row.reqStatus !== 'ARCHIVED'
 
 // 编辑态：同一时刻仅一个格子（key = rowId|day）
 const editing = reactive<{ key: string; value: string }>({ key: '', value: '' })
@@ -317,34 +324,44 @@ const handleEffortChange = (row: FlatRow) => {
   requestSave(row.row.rowId)
 }
 
-// 已排合计（本地实时求和）
-const scheduledSum = (row: ScheduleRowData): number => {
+// 已排合计（跨全部月份）：后端组内合计 - 加载时本行格子合计 + 本地当前格子合计
+// （本地编辑格子时实时反映：保存前本地即为最新，保存成功后本地值即已持久化）
+const rowSumAtLoad = ref<Record<number, number>>({})
+const localCellSum = (cells: Record<string, number>): number => {
   let sum = 0
-  for (const v of Object.values(row.cells)) sum += v || 0
+  for (const v of Object.values(cells)) sum += v || 0
   return Math.round(sum * 10) / 10
 }
+const scheduledSum = (row: ScheduleRowData): number => {
+  const loaded = rowSumAtLoad.value[row.rowId]
+  if (loaded === undefined) return localCellSum(row.cells)
+  return Math.round((row.scheduledSum - loaded + localCellSum(row.cells)) * 10) / 10
+}
 
-// ===== 行状态（三态派生）与复制到下月 =====
-// 行状态展示：VOID 已作废；未设工期/无已排内容 → 未排期（灰）；
-// 已排合计 < 工期 → 排期中（橙）；已排合计 ≥ 工期 → 已排期（蓝）
+// ===== 行状态（三态派生）与整个需求添加到下月 =====
+// 行状态展示：VOID 已作废；需求已归档 → 已归档（排期只读）；未设工期 → 待排期（灰）；
+// 跨月已排合计 < 工期 → 排期中（橙）；跨月已排合计 ≥ 工期 → 已排期（绿）
 const rowStatusInfo = (
-  row: ScheduleRowData
+  row: FlatRow
 ): { label: string; type: 'primary' | 'success' | 'info' | 'warning' } => {
-  if (row.status === 'VOID') return { label: '已作废', type: 'info' }
-  const sum = scheduledSum(row)
-  if (!row.plannedEffort || row.plannedEffort <= 0) return { label: '未排期', type: 'info' }
-  if (sum >= row.plannedEffort) return { label: '已排期', type: 'primary' }
+  if (row.row.status === 'VOID') return { label: '已作废', type: 'info' }
+  if (row.reqStatus === 'ARCHIVED') return { label: '已归档', type: 'info' }
+  if (!row.row.plannedEffort || row.row.plannedEffort <= 0) return { label: '待排期', type: 'info' }
+  const sum = scheduledSum(row.row)
+  if (sum >= row.row.plannedEffort) return { label: '已排期', type: 'success' }
   return { label: '排期中', type: 'warning' }
 }
 
-// 复制到下月可见：非作废行 + 本人是该项目 PM
-const canCopy = (row: FlatRow) => row.row.status !== 'VOID' && isPmOf(row.projectId)
+// 整个需求添加到下月/删除按钮可见：非作废行 + 本人是该项目 PM + 需求未归档（已归档排期只读）
+const canCopy = (row: FlatRow) =>
+  row.row.status !== 'VOID' && isPmOf(row.projectId) && row.reqStatus !== 'ARCHIVED'
 
-// 点击复制：确认后调接口（下月表不存在自动创建、带原工期），完成后跳转下月视图
+// 点击添加到下月：确认后调接口（该需求全部工种×负责人逐组插入下月新行：
+// 格子空白、工期跨月共用；下月表不存在自动创建），完成后跳转下月视图
 const handleCopy = async (row: FlatRow) => {
   try {
     await ElMessageBox.confirm(
-      `确认将「${row.row.realName} · ${craftLabel(row.row.craft)}」添加到下月排期表？`,
+      `确认将整个需求「${row.title}」添加到下月排期表？（全部工种×负责人，格子空白，工期跨月共用）`,
       '添加到下月',
       { type: 'warning', confirmButtonText: '添加', cancelButtonText: '取消' }
     )
@@ -352,14 +369,35 @@ const handleCopy = async (row: FlatRow) => {
     return
   }
   try {
-    const res = await copyScheduleRowToNextMonth(row.row.rowId)
+    const res = await copyRequirementToNextMonth(row.row.rowId)
     if (res.data.data.duplicated) {
-      ElMessage.success('已添加到下月排期表')
+      ElMessage.success(`已添加到下月排期表（新插入 ${res.data.data.insertedCount} 行）`)
     } else {
-      ElMessage.warning('该行已在下月排期中')
+      ElMessage.warning('该需求已在下月排期中')
     }
     await fetchMonths()
     activeMonthId.value = res.data.data.monthId
+    await fetchView()
+  } catch {
+    // 失败已由拦截器统一提示
+  }
+}
+
+// 从当月移除整个需求（PM）：确认后调接口（删除该需求当月全部行及格子，其他月份不受影响）
+const handleRemove = async (row: FlatRow) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认将「${row.title}」从当月排期表移除？（该需求本月全部排期行及格子将删除，其他月份不受影响）`,
+      '移除需求',
+      { type: 'warning', confirmButtonText: '移除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    if (!activeMonthId.value) return
+    const res = await removeRequirementFromMonth(activeMonthId.value, row.requirementId)
+    ElMessage.success(`已从当月排期表移除（删除 ${res.data.data} 行）`)
     await fetchView()
   } catch {
     // 失败已由拦截器统一提示
@@ -404,6 +442,14 @@ const fetchView = async () => {
   try {
     const res = await getScheduleMonthView(activeMonthId.value)
     view.value = res.data.data
+    // 记录各行加载时的格子合计（跨月已排合计的本地实时计算基准）
+    const sums: Record<number, number> = {}
+    for (const g of res.data.data.groups) {
+      for (const r of g.rows) {
+        sums[r.rowId] = localCellSum(r.cells)
+      }
+    }
+    rowSumAtLoad.value = sums
     editing.key = ''
   } catch {
     view.value = null
@@ -458,10 +504,107 @@ const pickerVisible = ref(false)
 const openPicker = () => {
   pickerVisible.value = true
 }
+// 当月已排的需求 id 集合（Picker 标记"已在当月"并禁选，后端仍兜底校验唯一）
+const existingReqIds = computed<number[]>(() =>
+  (view.value?.groups || []).map((g) => g.requirementId)
+)
 // 添加成功：刷新视图（新需求分组与排期行）
 const handleAdded = () => {
   fetchView()
 }
+
+// ===== 退出拦截：排期未完成不许离开 =====
+// 后端 /schedule/incomplete 仅返回当前用户为项目 PM 的可修复需求（非终态+未排满+开发已开始）；
+// 逃生门：允许跳转到未完成需求的详情页取消需求（取消后不再拦截），其余导航强制弹窗阻止
+
+// 未完成排期缓存标志：beforeunload（F5/关闭标签页）回调是同步的、无法实时查询，
+// 用缓存值兜底判断；挂载时、路由离开检查时、视图刷新（写操作后）都会更新
+const hasIncomplete = ref(false)
+
+// 刷新未完成排期缓存（静默失败：缓存仅用于 beforeunload 兜底，失败保持原值）
+const refreshIncompleteCache = async () => {
+  try {
+    const res = await listIncompleteRequirements()
+    hasIncomplete.value = (res.data.data || []).length > 0
+  } catch {
+    // 保持原值
+  }
+}
+
+// F5/关闭标签页：路由守卫不生效，用 beforeunload 兜底触发浏览器原生确认框
+//（原生框无法自定义文案与逃生门，仅提示"确定离开"；站内导航仍走 onBeforeRouteLeave 的可交互弹窗）
+const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+  if (hasIncomplete.value) {
+    e.preventDefault()
+    e.returnValue = ''
+  }
+}
+
+let guardDialogOpen = false
+onBeforeRouteLeave(async (to) => {
+  let incomplete: IncompleteRequirement[] = []
+  try {
+    const res = await listIncompleteRequirements()
+    incomplete = res.data.data || []
+    // 顺带同步 beforeunload 兜底缓存
+    hasIncomplete.value = incomplete.length > 0
+  } catch {
+    // 检查接口异常（如后端未部署新版本）：明确提示而非静默拦截，宁可拦截不可放行
+    ElMessage.error('无法检查排期完成状态（接口异常），请确认后端已更新后重试')
+    return false
+  }
+  if (incomplete.length === 0) return true
+  // 逃生门：目标为未完成需求的详情页 → 放行（去详情页取消需求），取消后该需求不再拦截
+  const detailMatch = to.path.match(/^\/requirements\/(\d+)$/)
+  if (detailMatch && incomplete.some((r) => r.requirementId === Number(detailMatch[1]))) {
+    return true
+  }
+  // 弹窗已打开时不再重复弹（并发触发导航直接拦截）
+  if (guardDialogOpen) return false
+  guardDialogOpen = true
+  try {
+    await ElMessageBox.alert(
+      h('div', null, [
+        h('p', { style: 'margin: 0 0 8px' }, '以下需求排期未完成，请先完成排期后再离开：'),
+        h('p', { style: 'margin: 0 0 8px; color: #909399; font-size: 12px' },
+          '也可点击需求进详情页取消需求（取消后排期不再拦截）'),
+        h(
+          'ul',
+          {
+            style:
+              'margin: 0; padding-left: 18px; max-height: 220px; overflow: auto; text-align: left'
+          },
+          incomplete.map((r) =>
+            h(
+              'li',
+              {
+                style: 'cursor: pointer; color: #1b4f8a; text-decoration: underline',
+                onClick: () => {
+                  ElMessageBox.close()
+                  router.push(`/requirements/${r.requirementId}`)
+                }
+              },
+              `${r.reqNo} ${r.title}`
+            )
+          )
+        )
+      ]),
+      '排期未完成',
+      {
+        type: 'warning',
+        confirmButtonText: '去完成排期',
+        showClose: false,
+        closeOnClickModal: false,
+        closeOnPressEscape: false
+      }
+    )
+    return false
+  } catch {
+    return false
+  } finally {
+    guardDialogOpen = false
+  }
+})
 
 // 点击需求名称进详情
 const goDetail = (requirementId: number) => {
@@ -473,11 +616,18 @@ const goCalendar = () => {
   router.push('/admin/calendar')
 }
 
-// 页面挂载：并行加载项目与月表列表，随后加载视图
+// 页面挂载：并行加载项目与月表列表，随后加载视图；注册 F5/关标签页兜底拦截
 onMounted(async () => {
+  window.addEventListener('beforeunload', handleBeforeUnload)
+  refreshIncompleteCache()
   fetchProjects()
   await fetchMonths()
   await fetchView()
+})
+
+// 卸载：移除 beforeunload 监听（离开排期页后不再拦截刷新/关闭）
+onUnmounted(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload)
 })
 </script>
 
@@ -539,19 +689,30 @@ onMounted(async () => {
             :column-config="{ resizable: true }"
             :scroll-x="{ enabled: false }"
             :scroll-y="{ enabled: false, gt: 0 }"
-            :show-header-overflow="true"
+            :show-header-overflow="'title'"
             height="auto"
             border
             size="small"
             class="matrix-table"
           >
-            <!-- 需求级列：编号 / 需求名称（固定列）；项目/策划/优先级随滚动，为日期列让位 -->
+            <!-- 需求级列：编号 / 需求名称+操作按钮（固定列）；项目/策划/优先级随滚动，为日期列让位 -->
             <vxe-column field="seq" title="编号" width="42" align="center" fixed="left" />
             <vxe-column field="title" title="需求名称" width="140" align="center" fixed="left">
               <template #default="{ row }">
-                <div class="req-cell" @click="goDetail(row.requirementId)">
-                  <span class="req-no">{{ row.reqNo }}</span>
-                  <span class="req-title" :title="row.title">{{ row.title }}</span>
+                <div class="req-cell">
+                  <div class="req-info" @click="goDetail(row.requirementId)">
+                    <span class="req-no">{{ row.reqNo }}</span>
+                    <span class="req-title" :title="row.title">{{ row.title }}</span>
+                  </div>
+                  <!-- 需求级操作：添加到下月 / 从当月移除（合并单元格垂直水平居中） -->
+                  <div v-if="canCopy(row)" class="req-actions">
+                    <el-button link type="primary" size="small" @click.stop="handleCopy(row)">
+                      添加到下月
+                    </el-button>
+                    <el-button link type="danger" size="small" @click.stop="handleRemove(row)">
+                      删除
+                    </el-button>
+                  </div>
                 </div>
               </template>
             </vxe-column>
@@ -660,20 +821,12 @@ onMounted(async () => {
                 </div>
               </template>
             </vxe-column>
-            <!-- 状态 / 操作（右侧固定） -->
+            <!-- 状态（右侧固定） -->
             <vxe-column field="status" title="状态" width="68" align="center" fixed="right">
               <template #default="{ row }">
-                <el-tag size="small" :type="rowStatusInfo(row.row).type" effect="dark">
-                  {{ rowStatusInfo(row.row).label }}
+                <el-tag size="small" :type="rowStatusInfo(row).type" effect="dark">
+                  {{ rowStatusInfo(row).label }}
                 </el-tag>
-              </template>
-            </vxe-column>
-            <vxe-column field="action" title="操作" width="80" align="center" fixed="right">
-              <template #default="{ row }">
-                <el-button v-if="canCopy(row)" link type="primary" size="small" @click="handleCopy(row)">
-                  添加到下月
-                </el-button>
-                <span v-else class="cell-text"></span>
               </template>
             </vxe-column>
             <!-- 当月无需求分组 -->
@@ -695,6 +848,7 @@ onMounted(async () => {
     <ScheduleRequirementPicker
       v-model="pickerVisible"
       :month-id="activeMonthId"
+      :existing-ids="existingReqIds"
       @success="handleAdded"
     />
   </div>
@@ -788,16 +942,32 @@ onMounted(async () => {
   text-overflow: ellipsis;
 }
 
-/* 需求单元格：编号 + 名称两行，整体可点击进详情 */
+/* 需求单元格：编号+名称 与「添加到下月」按钮，整体垂直水平居中（合并单元格内） */
 .req-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+/* 需求信息区（编号+名称）：可点击进详情 */
+.req-info {
   display: flex;
   flex-direction: column;
   gap: 2px;
   cursor: pointer;
 }
 
-.req-cell:hover .req-title {
+.req-info:hover .req-title {
   color: #409eff;
+}
+
+/* 需求级操作按钮组：水平排布居中 */
+.req-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* 需求编号：等宽小字 */
@@ -1033,6 +1203,18 @@ onMounted(async () => {
 :deep(tr.row-void) .vxe-cell {
   color: #303133;
   text-decoration: line-through;
+}
+
+/* 已归档需求的行：整行禁止光标（排期只读，所有交互入口均已禁用/隐藏） */
+:deep(tr.row-archived) {
+  cursor: not-allowed;
+}
+
+:deep(tr.row-archived) .vxe-cell,
+:deep(tr.row-archived) .vxe-cell .cell-value,
+:deep(tr.row-archived) .vxe-cell .req-info,
+:deep(tr.row-archived) .effort-input .el-input__inner {
+  cursor: not-allowed;
 }
 
 /* 表格正文单元格：垂直居中（vxe-cell 默认顶对齐；水平居中由列 align="center" 的 text-align 实现，

@@ -43,16 +43,16 @@ export interface ReqListItem {
   // 乐观锁版本：毫秒时间戳，编辑提交时原样带回
   updatedAt: number
   participants: ReqParticipant[]
+  // 各工种排期日期区间（进度缩略图的开发/测试节点按日期点亮用）
+  craftSchedules: CraftSchedule[]
   // 我在该需求中的角色：PM 或工种码；空数组 = 非项目成员（只读）
   myRole: string[]
 }
 
-// 需求详情 = 列表全部字段 + 富文本描述 + 附件 + 工种排期区间
+// 需求详情 = 列表全部字段 + 富文本描述 + 附件
 export interface ReqDetail extends ReqListItem {
   description: string
   attachments: ReqAttachment[]
-  // 各工种排期日期区间（全部非 VOID 排期行按工种聚合 min/max 格子日；进度条分支卡按日期配色）
-  craftSchedules: CraftSchedule[]
 }
 
 // 工种排期日期区间（无格子的工种无记录）
@@ -84,6 +84,8 @@ export interface ReqListParams {
   priority?: number
   plannerId?: number
   keyword?: string
+  // true = 排除终态（ARCHIVED/CANCELLED），需求池场景：未归档需求一直可选
+  excludeTerminal?: boolean
   page: number
   size: number
 }

@@ -6,12 +6,14 @@ import com.pm.dto.ScheduleRequirementDTO;
 import com.pm.dto.ScheduleRowSaveDTO;
 import com.pm.service.ScheduleService;
 import com.pm.vo.CopyRowResultVO;
+import com.pm.vo.ScheduleIncompleteVO;
 import com.pm.vo.ScheduleMonthVO;
 import com.pm.vo.ScheduleRowSaveResultVO;
 import com.pm.vo.ScheduleViewVO;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -72,6 +74,18 @@ public class ScheduleController {
     }
 
     /**
+     * 把需求从月表移除（仅该需求项目的 PM）：删除该需求在该月的全部排期行及格子（其他月份不受影响），
+     * 返回删除的行数
+     */
+    @DeleteMapping("/months/{monthId}/requirements/{requirementId}")
+    public Result<Integer> removeRequirement(@PathVariable Long monthId,
+                                             @PathVariable Long requirementId,
+                                             HttpServletRequest request) {
+        Long userId = (Long) request.getAttribute("userId");
+        return Result.success(scheduleService.removeRequirement(userId, monthId, requirementId));
+    }
+
+    /**
      * 保存排期行（仅项目 PM）：全量替换格子与计划工期，执行全部校验与跨月顺延检查，
      * 返回新版本 updatedAt 与顺延信息（overflow 非空时前端提示）
      */
@@ -84,13 +98,24 @@ public class ScheduleController {
     }
 
     /**
-     * 复制排期行到下月（仅项目 PM，VOID 行不可复制）：下月表不存在自动创建；
-     * 幂等（同键行已存在则不重复插入）；返回下月表 ID 与是否新插入（duplicated=false 时前端提示已存在）
+     * 整个需求添加到下月（仅项目 PM）：下月表不存在自动创建；
+     * 该需求全部排期组逐组插入下月新行（格子空白、工期跨月共用）；幂等（已存在的组跳过）；
+     * 返回下月表 ID、是否有新插入（duplicated=false 时前端提示已存在）与插入行数
      */
     @PostMapping("/rows/{rowId}/to-next-month")
-    public Result<CopyRowResultVO> copyRowToNextMonth(@PathVariable Long rowId,
-                                                      HttpServletRequest request) {
+    public Result<CopyRowResultVO> copyRequirementToNextMonth(@PathVariable Long rowId,
+                                                              HttpServletRequest request) {
         Long userId = (Long) request.getAttribute("userId");
-        return Result.success(scheduleService.copyRowToNextMonth(userId, rowId));
+        return Result.success(scheduleService.copyRequirementToNextMonth(userId, rowId));
+    }
+
+    /**
+     * 排期未完成的需求列表（退出排期界面前拦截检查用）：仅返回当前用户为项目 PM 的可修复需求，
+     * 非空时前端强制弹窗阻止跳转；普通成员无权修复，返回空不拦截
+     */
+    @GetMapping("/incomplete")
+    public Result<List<ScheduleIncompleteVO>> incompleteRequirements(HttpServletRequest request) {
+        Long userId = (Long) request.getAttribute("userId");
+        return Result.success(scheduleService.listIncompleteRequirements(userId));
     }
 }

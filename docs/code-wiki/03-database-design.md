@@ -85,7 +85,7 @@
 |------|------|
 | month_id / requirement_id / craft / user_id | 唯一键 `uk_month_req_craft_user` 四列；一行 = 该月表中某需求的某工种 × 某负责人 |
 | seq | 当月表内需求展示序号（同一需求的行共用 seq，分组排序用） |
-| planned_effort | DECIMAL(5,2) 计划工期（PM 填，≤999.99，可空） |
+| planned_effort | DECIMAL(5,2) 计划工期（PM 填，≤999.99，可空）。**跨全部月份共用**：排期组 = 同（需求,工种,负责人）的全部行，任一月保存工期会同步全组 |
 | status | `TODO 待开始 / DONE 已完成 / VOID 作废`（VOID = 参与人被移除等场景，前端灰显） |
 | is_overflow | 1 = 跨月自动顺延生成的行 |
 | done_at / done_by | 完成时间与操作人（本人或 PM 代点） |
@@ -95,6 +95,7 @@
 
 - 唯一键 `uk_row_day(row_id, day)`，索引 `idx_day`；`day` 为绝对日期（跨月对齐天然成立）。
 - `value` DECIMAL(4,2)：当天工作量，`0 < v ≤ 1`，步进 0.1；**空格子不落库**。
+- **已排统计按排期组跨月求和**：某组（需求×工种×负责人）已排 = 组内全部月份行的格子之和（`selectGroupCellsSum` / 视图 `scheduledSum`），排满判定与「已排」列展示均用此口径。
 
 ### 2.9 `calendar_day` — 工作日历
 

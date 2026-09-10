@@ -2,7 +2,9 @@ package com.pm.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.pm.entity.ScheduleRow;
+import com.pm.vo.CraftScheduleBatchVO;
 import com.pm.vo.CraftScheduleVO;
+import com.pm.vo.RequirementGroupAggVO;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
@@ -32,48 +34,44 @@ public interface ScheduleRowMapper extends BaseMapper<ScheduleRow> {
     Long countRequirementsInMonth(@Param("monthId") Long monthId);
 
     /**
-     * 定时任务候选（READY→DEV，排满驱动）：需求为 READY 且全部非 VOID 行已排满——
-     * 存在非 VOID 行，且每行有工期（>0）且格子合计 ≥ 工期（与 countNotFullRows 同口径的批量版，
-     * 兜底存量数据：排满即时推进在保存排期时完成，此处每小时补扫漏网）
+     * 排期组批量聚合（需求状态派生用）：多个需求各自按（需求, 工种, 负责人）聚合跨全部月份的非 VOID 行，
+     * 一次查询带回每组 工期(MAX)/行数/有格子行数/格子合计/最大格子日，避免逐需求 N+1。
+     * 排满判定：组无工期(pe IS NULL 或 ≤0) 或 已排合计 < 工期 → 未排满；
+     * 日期窗口判定：rowsWithCells < rowCount 表示组内存在空行（阻塞推进），maxDay 为组内最大格子日
      */
-    @Select("SELECT q.id FROM requirement q WHERE q.status = 'READY' " +
-            "AND EXISTS (SELECT 1 FROM schedule_row r WHERE r.requirement_id = q.id AND r.status != 'VOID') " +
-            "AND NOT EXISTS (SELECT 1 FROM schedule_row r WHERE r.requirement_id = q.id AND r.status != 'VOID' " +
-            "AND (r.planned_effort IS NULL OR r.planned_effort <= 0 " +
-            "OR r.planned_effort > (SELECT COALESCE(SUM(c.value), 0) FROM schedule_cell c WHERE c.row_id = r.id)))")
-    List<Long> selectReadyReqIdsAllFull();
+    @Select("<script>SELECT r.requirement_id AS requirementId, r.craft AS craft, r.user_id AS userId, " +
+            "MAX(r.planned_effort) AS plannedEffort, " +
+            "COUNT(DISTINCT r.id) AS rowCount, " +
+            "COUNT(DISTINCT CASE WHEN c.id IS NOT NULL THEN r.id END) AS rowsWithCells, " +
+            "COALESCE(SUM(c.value), 0) AS total, " +
+            "MAX(c.day) AS maxDay " +
+            "FROM schedule_row r LEFT JOIN schedule_cell c ON c.row_id = r.id " +
+            "WHERE r.status != 'VOID' AND r.requirement_id IN " +
+            "<foreach collection='reqIds' item='id' open='(' separator=',' close=')'>#{id}</foreach> " +
+            "GROUP BY r.requirement_id, r.craft, r.user_id</script>")
+    List<RequirementGroupAggVO> selectGroupAggBatch(@Param("reqIds") List<Long> reqIds);
 
     /**
-     * 定时任务候选（DEV→TEST，日期驱动）：需求为 DEV 且
-     * 1) 存在非 QA 非 VOID 排期行（开发类行）；
-     * 2) 全部此类行"已过排期"——每行必须有格子，且不存在 day >= today 的格子（无格子行视为未过排期，阻塞推进）
+     * 排期组（同需求同工种同负责人，跨全部月份）已排格子合计，排除指定行（保存校验/顺延判定用：
+     * 传入当前行 id，得到"其他月份"已排，加上本行新格子即为组内跨月合计）
      */
-    @Select("SELECT q.id FROM requirement q WHERE q.status = 'DEV' " +
-            "AND EXISTS (SELECT 1 FROM schedule_row r WHERE r.requirement_id = q.id AND r.status != 'VOID' AND r.craft != 'QA') " +
-            "AND NOT EXISTS (SELECT 1 FROM schedule_row r WHERE r.requirement_id = q.id AND r.status != 'VOID' AND r.craft != 'QA' " +
-            "AND (NOT EXISTS (SELECT 1 FROM schedule_cell c WHERE c.row_id = r.id) " +
-            "OR EXISTS (SELECT 1 FROM schedule_cell c WHERE c.row_id = r.id AND c.day >= #{today})))")
-    List<Long> selectDevReqIdsAllPassed(@Param("today") LocalDate today);
+    @Select("SELECT COALESCE(SUM(c.value), 0) FROM schedule_cell c " +
+            "JOIN schedule_row r ON r.id = c.row_id " +
+            "WHERE r.requirement_id = #{requirementId} AND r.craft = #{craft} AND r.user_id = #{userId} " +
+            "AND r.status != 'VOID' AND r.id != #{excludeRowId}")
+    BigDecimal selectGroupCellsSum(@Param("requirementId") Long requirementId, @Param("craft") String craft,
+                                   @Param("userId") Long userId, @Param("excludeRowId") Long excludeRowId);
 
     /**
-     * 定时任务候选（TEST→ARCHIVING，日期驱动）：需求为 TEST 且
-     * 1) 存在非 VOID 排期行（含 QA）；2) 全部行"已过排期"（口径同上，含 QA 行）
+     * 批量查询"开发已开工"的需求 id 集合（排期拦截用）：需求存在开发工种（FE/BE/OPS/UI）非 VOID 行
+     * 且有格子日 ≤ today（开发并行节点黄/绿）；与需求组聚合结果配合，判断排期未排满且不可回退的需求
      */
-    @Select("SELECT q.id FROM requirement q WHERE q.status = 'TEST' " +
-            "AND EXISTS (SELECT 1 FROM schedule_row r WHERE r.requirement_id = q.id AND r.status != 'VOID') " +
-            "AND NOT EXISTS (SELECT 1 FROM schedule_row r WHERE r.requirement_id = q.id AND r.status != 'VOID' " +
-            "AND (NOT EXISTS (SELECT 1 FROM schedule_cell c WHERE c.row_id = r.id) " +
-            "OR EXISTS (SELECT 1 FROM schedule_cell c WHERE c.row_id = r.id AND c.day >= #{today})))")
-    List<Long> selectTestReqIdsAllPassed(@Param("today") LocalDate today);
-
-    /**
-     * 排满判定（需求 PENDING→READY 用）：统计该需求"未排满"的非 VOID 行数。
-     * 未排满 = 无工期 / 工期≤0 / 格子合计 < 工期；返回 0 且存在非 VOID 行时即为全部排满
-     */
-    @Select("SELECT COUNT(*) FROM schedule_row r WHERE r.requirement_id = #{requirementId} AND r.status != 'VOID' " +
-            "AND (r.planned_effort IS NULL OR r.planned_effort <= 0 " +
-            "OR r.planned_effort > (SELECT COALESCE(SUM(c.value), 0) FROM schedule_cell c WHERE c.row_id = r.id))")
-    Long countNotFullRows(@Param("requirementId") Long requirementId);
+    @Select("<script>SELECT DISTINCT r.requirement_id FROM schedule_row r " +
+            "JOIN schedule_cell c ON c.row_id = r.id " +
+            "WHERE r.status != 'VOID' AND r.craft IN ('FE','BE','OPS','UI') AND c.day &lt;= #{today} " +
+            "AND r.requirement_id IN " +
+            "<foreach collection='reqIds' item='id' open='(' separator=',' close=')'>#{id}</foreach></script>")
+    List<Long> selectStartedDevReqIds(@Param("reqIds") List<Long> reqIds, @Param("today") LocalDate today);
 
     /**
      * 按工种聚合格子日期区间（需求详情进度条按工种配色用）：
@@ -84,4 +82,16 @@ public interface ScheduleRowMapper extends BaseMapper<ScheduleRow> {
             "FROM schedule_row r JOIN schedule_cell c ON c.row_id = r.id " +
             "WHERE r.requirement_id = #{requirementId} AND r.status != 'VOID' GROUP BY r.craft")
     List<CraftScheduleVO> selectCraftDateRange(@Param("requirementId") Long requirementId);
+
+    /**
+     * 按工种聚合格子日期区间（批量版，需求列表进度缩略图用）：
+     * 多个需求的全部非 VOID 行按（需求, 工种）聚合 min/max 格子日；无格子的（需求,工种）无记录
+     */
+    @Select("<script>SELECT r.requirement_id AS requirementId, r.craft AS craft, " +
+            "DATE_FORMAT(MIN(c.day), '%Y-%m-%d') AS startDate, DATE_FORMAT(MAX(c.day), '%Y-%m-%d') AS endDate " +
+            "FROM schedule_row r JOIN schedule_cell c ON c.row_id = r.id " +
+            "WHERE r.requirement_id IN " +
+            "<foreach collection='reqIds' item='id' open='(' separator=',' close=')'>#{id}</foreach> " +
+            "AND r.status != 'VOID' GROUP BY r.requirement_id, r.craft</script>")
+    List<CraftScheduleBatchVO> selectCraftDateRangeBatch(@Param("reqIds") List<Long> reqIds);
 }

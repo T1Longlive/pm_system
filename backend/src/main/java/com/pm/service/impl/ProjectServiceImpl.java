@@ -15,6 +15,7 @@ import com.pm.mapper.ProjectMapper;
 import com.pm.mapper.ProjectMemberMapper;
 import com.pm.mapper.UserMapper;
 import com.pm.service.ProjectService;
+import com.pm.service.RequirementService;
 import com.pm.vo.ProjectDetailVO;
 import com.pm.vo.ProjectListVO;
 import com.pm.vo.ProjectMemberVO;
@@ -41,6 +42,7 @@ public class ProjectServiceImpl implements ProjectService {
     private final ProjectMapper projectMapper;
     private final ProjectMemberMapper projectMemberMapper;
     private final UserMapper userMapper;
+    private final RequirementService requirementService;
 
     @Override
     public Page<ProjectListVO> pageProjects(Long userId, String keyword, long page, long size) {
@@ -240,8 +242,6 @@ public class ProjectServiceImpl implements ProjectService {
         if (craft != null && !CraftConstants.ALL_CRAFTS.contains(craft)) {
             throw new BizException(400, "非法工种：" + craft);
         }
-        // TODO 需求模块开发后：若被移除用户同时是本项目需求的参与人，需按需求文档 5.4.5
-        //  将其未完成排期行作废并发送站内通知，本期不做联动
         LambdaQueryWrapper<ProjectMember> wrapper = new LambdaQueryWrapper<ProjectMember>()
                 .eq(ProjectMember::getProjectId, projectId)
                 .eq(ProjectMember::getUserId, targetUserId);
@@ -258,6 +258,9 @@ public class ProjectServiceImpl implements ProjectService {
                 throw new BizException(404, "该成员无此工种");
             }
         }
+        // 需求联动（5.4.5）：被移除成员退出该项目全部非终态需求的参与人
+        // （craft 为空=全部工种），排期行标 VOID、通知本人并对账需求状态；同一事务内失败即回滚
+        requirementService.removeParticipantByProjectMember(projectId, targetUserId, craft, userId);
     }
 
     /**

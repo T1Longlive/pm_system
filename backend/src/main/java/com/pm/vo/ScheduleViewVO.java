@@ -52,6 +52,9 @@ public class ScheduleViewVO {
         /** 优先级：1高 2中 3低 */
         private Integer priority;
 
+        /** 需求状态（ARCHIVED 已归档时前端禁止编辑该需求全部排期行） */
+        private String reqStatus;
+
         /** 该需求的排期行 */
         private List<RowVO> rows;
     }
@@ -80,8 +83,11 @@ public class ScheduleViewVO {
         /** 1=跨月自动顺延生成的行 */
         private Integer isOverflow;
 
-        /** 计划工期（PM 填写，可空） */
+        /** 计划工期（PM 填写，可空；同需求×工种×负责人跨全部月份共用，任一月修改全组同步） */
         private BigDecimal plannedEffort;
+
+        /** 已排合计（跨全部月份：同需求×工种×负责人全部行格子之和，含本行；前端"已排"列与排期中/已排期状态派生用） */
+        private BigDecimal scheduledSum;
 
         /** 行版本（毫秒时间戳，编辑保存时原样回传做乐观锁校验） */
         private Long updatedAt;

@@ -12,17 +12,20 @@ import java.util.List;
 
 /**
  * 需求管理服务：列表/详情对任何登录用户可见（全局可见性模型），写操作按角色校验。
- * TODO 排期模块：PENDING→READY→DEV→TEST→ARCHIVING 的状态流转由排期保存/节点完成/定时任务触发，
- *  本模块仅负责创建（初始 PENDING）、编辑、取消（任意非终态→CANCELLED）、归档（仅 ARCHIVING→ARCHIVED）
+ * 需求状态为派生值（RequirementStageService 对账）：本模块仅负责创建（初始 PENDING）、编辑、
+ * 取消（任意非终态→CANCELLED）、归档（仅 ARCHIVING→ARCHIVED）两个人工落库决定；
+ * 其余流转由排期写路径与定时任务统一对账
  */
 public interface RequirementService {
 
     /**
      * 需求分页列表（全局汇总视图：projectId 空=全部项目，任何登录用户可见）。
-     * status/priority/plannerId 精确过滤，keyword 模糊匹配标题或编号
+     * status/priority/plannerId 精确过滤，keyword 模糊匹配标题或编号；
+     * excludeTerminal=true 时排除终态（ARCHIVED/CANCELLED，需求池场景：未归档需求一直可选）
      */
     Page<RequirementListVO> pageRequirements(Long userId, Long projectId, String status, Integer priority,
-                                             Long plannerId, String keyword, long page, long size);
+                                             Long plannerId, String keyword, boolean excludeTerminal,
+                                             long page, long size);
 
     /**
      * 需求详情（任何登录用户可看）：基础字段 + description + 参与人平铺 + 附件 + myRole
@@ -58,4 +61,11 @@ public interface RequirementService {
      * 通知全部参与人 REQ_ARCHIVED
      */
     void archiveRequirement(Long userId, Long requirementId);
+
+    /**
+     * 项目成员移除联动（需求文档 5.4.5）：把目标用户从该项目全部非终态需求的参与人中移除
+     * （craft 为空=全部工种，否则仅该工种），联动将其排期行标 VOID、通知本人并按排期数据
+     * 对账需求状态；终态需求（已归档/已取消）历史冻结不联动；返回受影响的需求个数
+     */
+    int removeParticipantByProjectMember(Long projectId, Long targetUserId, String craft, Long operatorId);
 }

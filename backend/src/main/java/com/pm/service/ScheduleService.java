@@ -4,6 +4,7 @@ import com.pm.dto.ScheduleMonthCreateDTO;
 import com.pm.dto.ScheduleRequirementDTO;
 import com.pm.dto.ScheduleRowSaveDTO;
 import com.pm.vo.CopyRowResultVO;
+import com.pm.vo.ScheduleIncompleteVO;
 import com.pm.vo.ScheduleMonthVO;
 import com.pm.vo.ScheduleRowSaveResultVO;
 import com.pm.vo.ScheduleViewVO;
@@ -11,7 +12,9 @@ import com.pm.vo.ScheduleViewVO;
 import java.util.List;
 
 /**
- * 排期管理服务：月度排期表 / 排期行生成 / 排期矩阵填写 / 跨月顺延 / 节点完成与需求状态推进
+ * 排期管理服务：月度排期表 / 排期行生成 / 排期矩阵填写 / 跨月顺延 / 需求状态对账触发
+ * 需求状态为派生值：本服务全部写路径末尾统一调 RequirementStageService.syncStage 对账，
+ * 本服务不直接写需求 status（归档/取消由需求模块人工落库）
  */
 public interface ScheduleService {
 
@@ -31,32 +34,42 @@ public interface ScheduleService {
     ScheduleViewVO getMonthView(Long monthId);
 
     /**
-     * 把需求加入月表（仅该需求项目的 PM）：需求必须为 PENDING 待排期状态，
-     * 按需求参与人生成排期行（每行 工种×负责人 唯一），返回生成行数；需求状态保持 PENDING（全部行排满后转 READY）
+     * 把需求加入月表（仅该需求项目的 PM）：需求必须为非终态（未归档未取消），
+     * 按需求参与人生成排期行（每行 工种×负责人 唯一），返回生成行数；
+     * 生成后按排期数据对账需求状态（工期跨月继承，已排统计跨月动态求和）
      */
     Integer addRequirement(Long userId, Long monthId, ScheduleRequirementDTO dto);
 
     /**
-     * 保存排期行（仅项目 PM）：全量替换格子与计划工期（非 VOID 行随时可编辑）。
-     * 校验：行非 VOID、乐观锁、格子归属月/可排班日/数值步进、同人同日合计≤1；
+     * 把需求从月表移除（仅该需求项目的 PM）：删除该需求在该月的全部排期行及其格子
+     * （其他月份的行不受影响）；移除后按剩余排期数据对账需求状态
+     * （全部月份无行 → 待排期；部分删除导致组不再排满 → 派生自动回退）；
+     * 写 SCHEDULE_REMOVE 日志并通知参与人；返回删除的行数
+     */
+    Integer removeRequirement(Long userId, Long monthId, Long requirementId);
+
+    /**
+     * 保存排期行（仅项目 PM）：全量替换格子与计划工期（终态需求只读，VOID 行拒绝编辑）。
+     * 校验：乐观锁、格子归属月/可排班日/数值步进、组内跨月合计≤工期、同人同日合计≤1；
      * 跨月顺延检查（当月排不下剩余工期时自动建下月表并追加 is_overflow 行）；
-     * 全部非 VOID 行排满时触发需求 PENDING→READY（通知全部参与人）并写 SCHEDULE_SAVE 日志；
+     * 保存后按「排期数据+日期」对账需求状态（排满自动推进、不再排满自动回退）；
      * 格子变化时通知行负责人 SCHEDULE_CHANGED
      */
     ScheduleRowSaveResultVO saveRow(Long userId, Long rowId, ScheduleRowSaveDTO dto);
 
     /**
-     * 复制排期行到下月（仅项目 PM，VOID 行不可复制）：下月表不存在自动创建（created_by=操作人）；
-     * 插入同需求/工种/负责人新行（工期带原值，status=TODO，is_overflow=0）；
-     * 幂等：下月已存在同键行则不重复插入；返回下月表 ID 与是否新插入
+     * 整个需求添加到下月（仅项目 PM，行所在需求为准；终态需求拒绝）：
+     * 下月表不存在自动创建（created_by=操作人）；
+     * 该需求全部排期组（工种×负责人，跨全部月份去重）逐组插入下月新行（格子空白、工期带原值跨月共用，
+     * status=TODO，is_overflow=0）；幂等：下月已存在的组跳过；返回下月表 ID、是否有新插入、插入行数
      */
-    CopyRowResultVO copyRowToNextMonth(Long userId, Long rowId);
+    CopyRowResultVO copyRequirementToNextMonth(Long userId, Long rowId);
 
     /**
-     * 需求状态推进定时任务（每小时，全部日期驱动）：
-     * READY→DEV（任一非 VOID 行存在格子日≤今天，不通知）；
-     * DEV→TEST（全部非 QA 非 VOID 行格子日<今天，通知）；
-     * TEST→ARCHIVING（全部非 VOID 行格子日<今天，通知）；返回本次推进的需求数
+     * 排期未完成的需求列表（前端排期界面退出拦截用），仅返回当前用户可修复的需求——
+     * 即当前用户为项目 PM（项目创建者）；口径：非终态且排期组未排满、
+     * 且存在已开始的开发工种（格子日≤今天，开发并行节点黄/绿）的需求——
+     * 开发已开始不可回退，须强制完成排期后才能离开排期界面（不依赖需求状态字段，PENDING 同样拦截）
      */
-    int advanceBySchedule();
+    List<ScheduleIncompleteVO> listIncompleteRequirements(Long userId);
 }

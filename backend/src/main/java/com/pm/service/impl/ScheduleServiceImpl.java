@@ -27,9 +27,12 @@ import com.pm.mapper.ScheduleRowMapper;
 import com.pm.mapper.UserMapper;
 import com.pm.service.CalendarService;
 import com.pm.service.NotificationService;
+import com.pm.service.RequirementStageService;
 import com.pm.service.ScheduleService;
 import com.pm.vo.CalendarDayVO;
 import com.pm.vo.CopyRowResultVO;
+import com.pm.vo.RequirementGroupAggVO;
+import com.pm.vo.ScheduleIncompleteVO;
 import com.pm.vo.ScheduleMonthVO;
 import com.pm.vo.ScheduleRowSaveResultVO;
 import com.pm.vo.ScheduleViewVO;
@@ -46,6 +49,8 @@ import java.time.YearMonth;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -64,9 +69,13 @@ import java.util.stream.Collectors;
  * 3. 跨月：plannedEffort 非空 且 当月格子合计<plannedEffort 且 当月剩余可填工作日数为 0 时，
  *    自动创建下月表并追加 is_overflow=1 的顺延行；PM 也可手动"添加到下月"（复制行，带原工期）
  * 4. 行状态：仅 TODO/VOID 落库；已排/排期中/未排期三态由前端按 工期 vs 已排合计 派生
- * 5. 需求状态推进：全部非 VOID 行排满 → PENDING→READY→DEV（保存时连续触发，通知；"已排期"节点即时完成，
- *    定时任务每小时按同口径兜底存量）；全部非 QA 行格子日<今天 → DEV→TEST（通知）；
- *    全部行格子日<今天 → TEST→ARCHIVING（通知）；ARCHIVING→ARCHIVED 由需求详情 PM 手动归档
+ * 5. 需求状态派生化：status 由 stage 纯函数按「排期数据 + 日期」派生（RequirementStageService），
+ *    本服务不直接写需求状态；全部写路径（加入/移除/保存行/复制下月）末尾统一调 syncStage 对账，
+ *    纯时间流逝导致的变化（DEV→TEST→ARCHIVING 等）由定时任务全量对账兜底；
+ *    ARCHIVING→ARCHIVED 由需求详情 PM 手动归档（人工落库决定，不参与派生）
+ * 6. 排期不完整拦截：修改/删除导致排期组不再排满时状态自动派生回退（无需回退代码）；
+ *    「未排满 + 开发工种已开始」的需求由前端排期界面退出拦截（GET /schedule/incomplete，
+ *    仅返回当前用户为项目 PM 的可修复需求）强制完成排期后才允许离开
  */
 @Service
 @RequiredArgsConstructor
@@ -77,16 +86,10 @@ public class ScheduleServiceImpl implements ScheduleService {
     /** 排期行状态：作废（参与人移除） */
     private static final String ROW_VOID = "VOID";
 
-    /** 需求状态：待排期 */
-    private static final String REQ_PENDING = "PENDING";
-    /** 需求状态：已排期 */
-    private static final String REQ_READY = "READY";
-    /** 需求状态：开发中 */
-    private static final String REQ_DEV = "DEV";
-    /** 需求状态：测试中 */
-    private static final String REQ_TEST = "TEST";
-    /** 需求状态：待归档 */
-    private static final String REQ_ARCHIVING = "ARCHIVING";
+    /** 需求终态：已归档（不可再排期，状态由需求模块人工落库） */
+    private static final String REQ_ARCHIVED = "ARCHIVED";
+    /** 需求终态：已取消（不可再排期，状态由需求模块人工落库） */
+    private static final String REQ_CANCELLED = "CANCELLED";
 
     /** 日历类型：工作日（可排班） */
     private static final String TYPE_WORKDAY = "WORKDAY";
@@ -114,6 +117,7 @@ public class ScheduleServiceImpl implements ScheduleService {
     private final BizOperationLogMapper operationLogMapper;
     private final NotificationService notificationService;
     private final CalendarService calendarService;
+    private final RequirementStageService stageSyncService;
 
     // ==================== 月度排期表 ====================
 
@@ -180,6 +184,27 @@ public class ScheduleServiceImpl implements ScheduleService {
                         new LambdaQueryWrapper<ScheduleCell>().in(ScheduleCell::getRowId, rowIds))
                 .stream().collect(Collectors.groupingBy(ScheduleCell::getRowId));
 
+        // 跨月已排合计：查这些需求全部月份的非 VOID 行及其格子，按（需求,工种,负责人）分组求和
+        List<Long> reqIds = rows.stream().map(ScheduleRow::getRequirementId).distinct().toList();
+        List<ScheduleRow> allMonthRows = scheduleRowMapper.selectList(new LambdaQueryWrapper<ScheduleRow>()
+                .in(ScheduleRow::getRequirementId, reqIds)
+                .ne(ScheduleRow::getStatus, ROW_VOID));
+        Map<Long, String> groupKeyByRowId = new HashMap<>();
+        for (ScheduleRow r : allMonthRows) {
+            groupKeyByRowId.put(r.getId(), groupKey(r.getRequirementId(), r.getCraft(), r.getUserId()));
+        }
+        Set<Long> allRowIds = allMonthRows.stream().map(ScheduleRow::getId).collect(Collectors.toSet());
+        Map<String, BigDecimal> groupSum = new HashMap<>();
+        if (!allRowIds.isEmpty()) {
+            for (ScheduleCell cell : scheduleCellMapper.selectList(new LambdaQueryWrapper<ScheduleCell>()
+                    .in(ScheduleCell::getRowId, allRowIds))) {
+                String key = groupKeyByRowId.get(cell.getRowId());
+                if (key != null) {
+                    groupSum.merge(key, cell.getValue(), BigDecimal::add);
+                }
+            }
+        }
+
         // 按需求分组（保持行的 工种+id 顺序）
         Map<Long, List<ScheduleRow>> rowsByReq = rows.stream()
                 .collect(Collectors.groupingBy(ScheduleRow::getRequirementId, LinkedHashMap::new, Collectors.toList()));
@@ -199,8 +224,11 @@ public class ScheduleServiceImpl implements ScheduleService {
             group.setProjectName(project == null ? null : project.getName());
             group.setPlannerName(nameMap.get(req.getPlannerId()));
             group.setPriority(req.getPriority());
+            group.setReqStatus(req.getStatus());
             group.setRows(entry.getValue().stream()
-                    .map(row -> toRowVO(row, cellsByRow.getOrDefault(row.getId(), List.of()), nameMap))
+                    .map(row -> toRowVO(row, cellsByRow.getOrDefault(row.getId(), List.of()), nameMap,
+                            groupSum.getOrDefault(groupKey(row.getRequirementId(), row.getCraft(), row.getUserId()),
+                                    BigDecimal.ZERO)))
                     .toList());
             groups.add(group);
         }
@@ -225,9 +253,9 @@ public class ScheduleServiceImpl implements ScheduleService {
         if (!project.getCreatorId().equals(userId)) {
             throw new BizException(403, "无权限");
         }
-        // 仅待排期需求可排期
-        if (!REQ_PENDING.equals(req.getStatus())) {
-            throw new BizException(400, "仅待排期需求可排期");
+        // 未归档且未取消的需求均可排期（需求池：需求一直保留，直到归档/取消）
+        if (REQ_ARCHIVED.equals(req.getStatus()) || REQ_CANCELLED.equals(req.getStatus())) {
+            throw new BizException(400, "已归档或已取消的需求不可排期");
         }
         // 同一需求同月只生成一次
         Long count = scheduleRowMapper.selectCount(new LambdaQueryWrapper<ScheduleRow>()
@@ -246,6 +274,15 @@ public class ScheduleServiceImpl implements ScheduleService {
         }
         // seq = 当月该表已有需求数 + 1
         int seq = scheduleRowMapper.countRequirementsInMonth(monthId).intValue() + 1;
+        // 工期跨月共用：继承该需求在其他月份已设置的工期（同组取任一非空值；无历史则为空=待排期）
+        // 已排统计无需复制——查询时按组跨全部月份动态求和，自动带上其他月份的格子
+        Map<String, BigDecimal> effortByGroup = new HashMap<>();
+        for (ScheduleRow r : scheduleRowMapper.selectList(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getRequirementId, req.getId())
+                .ne(ScheduleRow::getStatus, ROW_VOID)
+                .isNotNull(ScheduleRow::getPlannedEffort))) {
+            effortByGroup.putIfAbsent(r.getCraft() + ":" + r.getUserId(), r.getPlannedEffort());
+        }
         for (RequirementParticipant participant : participants) {
             ScheduleRow row = new ScheduleRow();
             row.setMonthId(monthId);
@@ -253,12 +290,51 @@ public class ScheduleServiceImpl implements ScheduleService {
             row.setCraft(participant.getCraft());
             row.setUserId(participant.getUserId());
             row.setSeq(seq);
+            row.setPlannedEffort(effortByGroup.get(participant.getCraft() + ":" + participant.getUserId()));
             row.setStatus(ROW_TODO);
             row.setIsOverflow(0);
             scheduleRowMapper.insert(row);
         }
-        // 需求状态保持 PENDING，首次保存格子时才转 READY
+        // 需求状态对账（状态派生化）：排期行集合变化后按排期数据派生状态，统一收口
+        stageSyncService.syncStage(req.getId(), userId);
         return participants.size();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Integer removeRequirement(Long userId, Long monthId, Long requirementId) {
+        ScheduleMonth month = requireMonth(monthId);
+        Requirement req = requireRequirement(requirementId);
+        Project project = requireProject(req.getProjectId());
+        // 权限：仅该需求项目的 PM（与加入排期一致）
+        if (!project.getCreatorId().equals(userId)) {
+            throw new BizException(403, "无权限");
+        }
+        // 该需求在该月的全部排期行
+        List<ScheduleRow> monthRows = scheduleRowMapper.selectList(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getMonthId, monthId)
+                .eq(ScheduleRow::getRequirementId, requirementId));
+        if (monthRows.isEmpty()) {
+            throw new BizException(404, "该需求在此月排期表中不存在");
+        }
+        // 连带删除这些行的格子
+        List<Long> rowIds = monthRows.stream().map(ScheduleRow::getId).toList();
+        scheduleCellMapper.delete(new LambdaQueryWrapper<ScheduleCell>().in(ScheduleCell::getRowId, rowIds));
+        // 删除当月行（其他月份的行不受影响）
+        scheduleRowMapper.delete(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getMonthId, monthId)
+                .eq(ScheduleRow::getRequirementId, requirementId));
+        // 需求状态对账（状态派生化）：删除后按剩余排期数据派生——全部月份无行回 PENDING；
+        // 部分删除导致组不再排满同样自动回退（回退后由前端退出拦截强制完成排期）
+        stageSyncService.syncStage(requirementId, userId);
+        // 留痕 + 通知参与人
+        writeLog(requirementId, userId, "SCHEDULE_REMOVE",
+                "从" + month.getYear() + "年" + month.getMonth() + "月排期表移除：" + req.getTitle()
+                        + "（" + monthRows.size() + " 行）");
+        notifyAllParticipants(req, "排期移除",
+                "需求「" + req.getTitle() + "」已被项目经理从" + month.getYear() + "年" + month.getMonth()
+                        + "月排期表移除");
+        return monthRows.size();
     }
 
     // ==================== 排期矩阵填写 ====================
@@ -274,6 +350,13 @@ public class ScheduleServiceImpl implements ScheduleService {
         if (!project.getCreatorId().equals(userId)) {
             throw new BizException(403, "无权限");
         }
+        // 校验0：终态需求的排期行不可编辑（已归档历史只读；已取消需求排期同样冻结）
+        if (REQ_ARCHIVED.equals(req.getStatus())) {
+            throw new BizException(400, "该需求已归档，排期不可修改");
+        }
+        if (REQ_CANCELLED.equals(req.getStatus())) {
+            throw new BizException(400, "该需求已取消，排期不可修改");
+        }
         // 校验1：仅 VOID 拒绝编辑（非 VOID 行随时可编辑工期与格子）
         if (ROW_VOID.equals(row.getStatus())) {
             throw new BizException(400, "该排期行已作废，不可编辑");
@@ -288,9 +371,11 @@ public class ScheduleServiceImpl implements ScheduleService {
         // 校验4：格子日期归属月 + 可排班日 + 数值范围与 0.1 步进
         Map<LocalDate, CalendarDay> monthDays = calendarService.getMonthDays(month.getYear(), month.getMonth());
         Map<LocalDate, BigDecimal> newCells = checkAndNormalizeCells(dto.getCells(), month, monthDays);
-        // 校验5：已排合计不得超过计划工期（超过则拒绝，提示先修改工期）
+        // 校验5：组内跨月已排合计（其他月份 + 本月新格子）不得超过计划工期（超过则拒绝，提示先修改工期）
         if (dto.getPlannedEffort() != null) {
-            BigDecimal sum = newCells.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal otherMonthsSum = scheduleRowMapper.selectGroupCellsSum(
+                    row.getRequirementId(), row.getCraft(), row.getUserId(), rowId);
+            BigDecimal sum = otherMonthsSum.add(newCells.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add));
             if (sum.compareTo(dto.getPlannedEffort()) > 0) {
                 throw new BizException(400, "已排工作量" + sum.stripTrailingZeros().toPlainString()
                         + "超过计划工期" + dto.getPlannedEffort().stripTrailingZeros().toPlainString()
@@ -320,31 +405,21 @@ public class ScheduleServiceImpl implements ScheduleService {
                 .eq(ScheduleRow::getId, rowId)
                 .set(ScheduleRow::getPlannedEffort, dto.getPlannedEffort())
                 .set(ScheduleRow::getUpdatedAt, newVersion));
+        // 工期跨月共用：同（需求,工种,负责人）其他月份的行同步工期（仅更新工期，不动其乐观锁版本）
+        scheduleRowMapper.update(null, new LambdaUpdateWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getRequirementId, row.getRequirementId())
+                .eq(ScheduleRow::getCraft, row.getCraft())
+                .eq(ScheduleRow::getUserId, row.getUserId())
+                .ne(ScheduleRow::getId, rowId)
+                .set(ScheduleRow::getPlannedEffort, dto.getPlannedEffort()));
 
         // 跨月自动顺延检查（当月排不下剩余工期时自动建下月表并追加顺延行）
         ScheduleRowSaveResultVO.OverflowVO overflow =
                 checkAndCreateOverflow(row, month, req, dto.getPlannedEffort(), newCells, monthDays, userId);
 
-        // 排满检查：PENDING/READY 需求且全部非 VOID 行（跨全部月份）均已排满 → 即时推进
-        // 已排满定义：每行 planned_effort>0 且 该行 schedule_cell 合计 >= planned_effort（含本行刚保存的格子）
-        // PENDING→READY→DEV 连续推进：首次排满时"已排期"节点即时完成（变绿），不等日期驱动的定时任务
-        Long notFullCount = scheduleRowMapper.countNotFullRows(req.getId());
-        boolean allFull = notFullCount != null && notFullCount == 0;
-        if (allFull && REQ_PENDING.equals(req.getStatus())
-                && advanceStatus(req.getId(), REQ_PENDING, REQ_READY)) {
-            writeLog(req.getId(), userId, "SCHEDULE_SAVE",
-                    "排期保存：" + req.getReqNo() + "，全部排期行已排满，需求进入已排期");
-            notifyAllParticipants(req, "需求状态变更",
-                    "需求「" + req.getTitle() + "」已完成排期，进入已排期");
-            req.setStatus(REQ_READY);
-        }
-        if (allFull && REQ_READY.equals(req.getStatus())
-                && advanceStatus(req.getId(), REQ_READY, REQ_DEV)) {
-            writeLog(req.getId(), userId, "SCHEDULE_SAVE",
-                    "排期保存：" + req.getReqNo() + "，全部负责人排期已完成，需求进入开发中");
-            notifyAllParticipants(req, "需求状态变更",
-                    "需求「" + req.getTitle() + "」全部负责人排期已完成，进入开发中");
-        }
+        // 需求状态对账（状态派生化）：格子/工期/顺延行写完后按「排期数据+日期」派生状态，
+        // 排满则自动推进（PENDING→DEV）、不再排满则自动回退，统一收口无需链式推进/回退代码
+        stageSyncService.syncStage(req.getId(), userId);
 
         // 通知该行负责人：排期被修改（仅格子实际变化时）
         if (cellsChanged) {
@@ -364,7 +439,7 @@ public class ScheduleServiceImpl implements ScheduleService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public CopyRowResultVO copyRowToNextMonth(Long userId, Long rowId) {
+    public CopyRowResultVO copyRequirementToNextMonth(Long userId, Long rowId) {
         ScheduleRow row = requireRow(rowId);
         ScheduleMonth month = requireMonth(row.getMonthId());
         Requirement req = requireRequirement(row.getRequirementId());
@@ -373,74 +448,106 @@ public class ScheduleServiceImpl implements ScheduleService {
         if (!project.getCreatorId().equals(userId)) {
             throw new BizException(403, "无权限");
         }
-        // 作废行不可复制
-        if (ROW_VOID.equals(row.getStatus())) {
-            throw new BizException(400, "该排期行已作废，不可复制");
+        // 终态校验：已归档/已取消的需求不可添加到下月
+        if (REQ_ARCHIVED.equals(req.getStatus()) || REQ_CANCELLED.equals(req.getStatus())) {
+            throw new BizException(400, "已归档或已取消的需求不可添加到下月");
+        }
+        // 该需求全部排期组（craft × user，跨全部月份去重，取各组最新一行带出工期）
+        List<ScheduleRow> allRows = scheduleRowMapper.selectList(new LambdaQueryWrapper<ScheduleRow>()
+                .eq(ScheduleRow::getRequirementId, req.getId())
+                .ne(ScheduleRow::getStatus, ROW_VOID)
+                .orderByDesc(ScheduleRow::getId));
+        Map<String, ScheduleRow> groups = new LinkedHashMap<>();
+        for (ScheduleRow r : allRows) {
+            groups.putIfAbsent(r.getCraft() + ":" + r.getUserId(), r);
+        }
+        if (groups.isEmpty()) {
+            throw new BizException(400, "该需求没有可添加的排期行");
         }
         // 下月表不存在则自动创建（跨年自动进位）
         ScheduleMonth nextMonth = resolveOrCreateNextMonth(month, userId);
-        // 幂等：下月已存在同（需求,工种,负责人）行则不重复插入
-        Long existCount = scheduleRowMapper.selectCount(new LambdaQueryWrapper<ScheduleRow>()
-                .eq(ScheduleRow::getMonthId, nextMonth.getId())
-                .eq(ScheduleRow::getRequirementId, row.getRequirementId())
-                .eq(ScheduleRow::getCraft, row.getCraft())
-                .eq(ScheduleRow::getUserId, row.getUserId()));
-        if (existCount != null && existCount > 0) {
-            return toCopyResult(nextMonth.getId(), false);
-        }
-        ScheduleRow copy = new ScheduleRow();
-        copy.setMonthId(nextMonth.getId());
-        copy.setRequirementId(row.getRequirementId());
-        copy.setCraft(row.getCraft());
-        copy.setUserId(row.getUserId());
-        copy.setSeq(resolveNextMonthSeq(nextMonth, row.getRequirementId()));
-        // 工期带原值（非剩余），下月继续填格子
-        copy.setPlannedEffort(row.getPlannedEffort());
-        copy.setStatus(ROW_TODO);
-        copy.setIsOverflow(0);
-        try {
-            scheduleRowMapper.insert(copy);
-        } catch (DuplicateKeyException e) {
-            // uk_month_req_craft_user 并发兜底：已存在同键行视为未新插入
-            return toCopyResult(nextMonth.getId(), false);
+        // 整个需求逐组复制到下月：幂等（下月已有同组行跳过），格子空白、工期带原值（跨月共用）
+        int seq = resolveNextMonthSeq(nextMonth, req.getId());
+        int inserted = 0;
+        for (ScheduleRow source : groups.values()) {
+            Long existCount = scheduleRowMapper.selectCount(new LambdaQueryWrapper<ScheduleRow>()
+                    .eq(ScheduleRow::getMonthId, nextMonth.getId())
+                    .eq(ScheduleRow::getRequirementId, req.getId())
+                    .eq(ScheduleRow::getCraft, source.getCraft())
+                    .eq(ScheduleRow::getUserId, source.getUserId()));
+            if (existCount != null && existCount > 0) {
+                continue;
+            }
+            ScheduleRow copy = new ScheduleRow();
+            copy.setMonthId(nextMonth.getId());
+            copy.setRequirementId(req.getId());
+            copy.setCraft(source.getCraft());
+            copy.setUserId(source.getUserId());
+            copy.setSeq(seq);
+            copy.setPlannedEffort(source.getPlannedEffort());
+            copy.setStatus(ROW_TODO);
+            copy.setIsOverflow(0);
+            try {
+                scheduleRowMapper.insert(copy);
+                inserted++;
+            } catch (DuplicateKeyException e) {
+                // uk_month_req_craft_user 并发兜底：已存在同键行视为未新插入
+            }
         }
         // 操作留痕
-        writeLog(req.getId(), userId, "SCHEDULE_COPY",
-                "复制排期行至" + nextMonth.getYear() + "年" + nextMonth.getMonth() + "月："
-                        + req.getTitle() + "·" + craftName(row.getCraft()) + "·" + userName(row.getUserId()));
-        return toCopyResult(nextMonth.getId(), true);
+        if (inserted > 0) {
+            writeLog(req.getId(), userId, "SCHEDULE_COPY",
+                    "整个需求添加到" + nextMonth.getYear() + "年" + nextMonth.getMonth() + "月："
+                            + req.getTitle() + "（" + inserted + " 行，格子空白、工期跨月共用）");
+        }
+        // 需求状态对账（状态派生化）：写路径统一收口（复制行不影响跨月组统计，通常无变化）
+        stageSyncService.syncStage(req.getId(), userId);
+        return toCopyResult(nextMonth.getId(), inserted > 0, inserted);
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
-    public int advanceBySchedule() {
-        int advanced = 0;
-        LocalDate today = LocalDate.now();
-        // 1) READY→DEV：全部非 VOID 行已排满（排期完成即进入开发中，不通知——保存排期时已即时推进并通知，此处每小时兜底存量）
-        for (Long reqId : scheduleRowMapper.selectReadyReqIdsAllFull()) {
-            if (advanceStatus(reqId, REQ_READY, REQ_DEV)) {
-                advanced++;
-            }
+    public List<ScheduleIncompleteVO> listIncompleteRequirements(Long userId) {
+        // 拦截口径与进度图节点判定一致（不依赖需求状态字段，防 PENDING 漏网）：
+        // 非终态（未归档未取消）且 排期组未排满 且 存在已开始的开发工种（FE/BE/OPS/UI 有格子日≤今天，
+        // 即开发并行节点黄/绿）——此类需求不可回退（开发已开始），须强制完成排期后才能离开排期界面。
+        // 仅返回当前用户为项目 PM（项目创建者）的需求：普通成员无权修复，不被 PM 未完成的排期困住
+        List<Long> projectIds = projectMapper.selectList(new LambdaQueryWrapper<Project>()
+                        .eq(Project::getCreatorId, userId)).stream().map(Project::getId).toList();
+        if (projectIds.isEmpty()) {
+            return List.of();
         }
-        // 2) DEV→TEST：全部非 QA 非 VOID 行的格子日 < 今天（QA 可与开发并行）
-        for (Long reqId : scheduleRowMapper.selectDevReqIdsAllPassed(today)) {
-            Requirement req = requireRequirement(reqId);
-            if (advanceStatus(reqId, REQ_DEV, REQ_TEST)) {
-                advanced++;
-                notifyAllParticipants(req, "需求状态变更",
-                        "需求「" + req.getTitle() + "」全部开发任务已排期结束，已进入测试中");
-            }
+        List<Requirement> reqs = requirementMapper.selectList(new LambdaQueryWrapper<Requirement>()
+                .in(Requirement::getProjectId, projectIds)
+                .notIn(Requirement::getStatus, List.of(REQ_ARCHIVED, REQ_CANCELLED))
+                .orderByAsc(Requirement::getId));
+        if (reqs.isEmpty()) {
+            return List.of();
         }
-        // 3) TEST→ARCHIVING：全部非 VOID 行（含 QA）的格子日 < 今天
-        for (Long reqId : scheduleRowMapper.selectTestReqIdsAllPassed(today)) {
-            Requirement req = requireRequirement(reqId);
-            if (advanceStatus(reqId, REQ_TEST, REQ_ARCHIVING)) {
-                advanced++;
-                notifyAllParticipants(req, "需求状态变更",
-                        "需求「" + req.getTitle() + "」全部排期已结束，已进入待归档");
-            }
+        List<Long> reqIds = reqs.stream().map(Requirement::getId).toList();
+        // 批量聚合判定排满（任一组无工期/工期≤0/跨月合计<工期 → 未排满），避免逐需求 N+1
+        Set<Long> notFullReqIds = scheduleRowMapper.selectGroupAggBatch(reqIds).stream()
+                .filter(g -> g.getPlannedEffort() == null || g.getPlannedEffort().signum() <= 0
+                        || g.getTotal().compareTo(g.getPlannedEffort()) < 0)
+                .map(RequirementGroupAggVO::getRequirementId)
+                .collect(Collectors.toSet());
+        if (notFullReqIds.isEmpty()) {
+            return List.of();
         }
-        return advanced;
+        // 批量查询开发已开工的需求 id 集合（开发未开始可派生回退，不拦截）
+        List<Long> candidateIds = reqIds.stream().filter(notFullReqIds::contains).toList();
+        Set<Long> startedDevReqIds = new HashSet<>(scheduleRowMapper.selectStartedDevReqIds(candidateIds, LocalDate.now()));
+        List<ScheduleIncompleteVO> result = new ArrayList<>();
+        for (Requirement req : reqs) {
+            if (!notFullReqIds.contains(req.getId()) || !startedDevReqIds.contains(req.getId())) {
+                continue;
+            }
+            ScheduleIncompleteVO vo = new ScheduleIncompleteVO();
+            vo.setRequirementId(req.getId());
+            vo.setReqNo(req.getReqNo());
+            vo.setTitle(req.getTitle());
+            result.add(vo);
+        }
+        return result;
     }
 
     // ==================== 私有校验 ====================
@@ -540,10 +647,10 @@ public class ScheduleServiceImpl implements ScheduleService {
 
     /**
      * 跨月自动顺延检查（保存事务内）：
-     * 条件（同时满足）：plannedEffort 非空 且 该行当月格子合计 < plannedEffort 且 该行当月剩余可填工作日数为 0
-     * （当月可排班日中未被本行填值的格子数=0，即当月已排不下剩余工期）。
+     * 条件（同时满足）：plannedEffort 非空 且 组内跨月已排合计（其他月份 + 本月新格子）< plannedEffort
+     * 且 该行当月剩余可填工作日数为 0（当月可排班日中未被本行填值的格子数=0，即当月已排不下剩余工期）。
      * 动作：下月排期表不存在则自动创建（created_by=当前操作人）；插入顺延行（同需求/工种/负责人，
-     * is_overflow=1，planned_effort=剩余工期，格子空白）；通知该行负责人 SCHEDULE_OVERFLOW。
+     * is_overflow=1，planned_effort=原工期（工期跨月共用），格子空白）；通知该行负责人 SCHEDULE_OVERFLOW。
      * 幂等：下月已存在同（需求,工种,负责人）行则不重复插入。
      */
     private ScheduleRowSaveResultVO.OverflowVO checkAndCreateOverflow(ScheduleRow row, ScheduleMonth month, Requirement req,
@@ -552,9 +659,12 @@ public class ScheduleServiceImpl implements ScheduleService {
         if (plannedEffort == null) {
             return null;
         }
-        BigDecimal sum = newCells.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
-        if (sum.compareTo(plannedEffort) >= 0) {
-            // 已排工作量不小于计划工期，无需顺延
+        // 组内跨月已排合计 = 其他月份已排 + 本月新格子
+        BigDecimal otherMonthsSum = scheduleRowMapper.selectGroupCellsSum(
+                row.getRequirementId(), row.getCraft(), row.getUserId(), row.getId());
+        BigDecimal groupTotal = otherMonthsSum.add(newCells.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add));
+        if (groupTotal.compareTo(plannedEffort) >= 0) {
+            // 跨月已排合计不小于计划工期，无需顺延
             return null;
         }
         // 当月剩余可填工作日数（可排班日 - 本行已填格子）> 0 说明当月还排得下
@@ -566,8 +676,8 @@ public class ScheduleServiceImpl implements ScheduleService {
         if (unfilled > 0) {
             return null;
         }
-        // 剩余工期 = 计划工期 - 当月格子合计
-        BigDecimal carriedEffort = plannedEffort.subtract(sum).setScale(2, RoundingMode.HALF_UP);
+        // 剩余工期 = 计划工期 - 组内跨月已排合计
+        BigDecimal carriedEffort = plannedEffort.subtract(groupTotal).setScale(2, RoundingMode.HALF_UP);
         // 下月（跨年自动进位），下月排期表不存在则自动创建
         YearMonth next = YearMonth.of(month.getYear(), month.getMonth()).plusMonths(1);
         ScheduleMonth nextMonth = resolveOrCreateNextMonth(month, operatorId);
@@ -593,7 +703,8 @@ public class ScheduleServiceImpl implements ScheduleService {
         overflowRow.setCraft(row.getCraft());
         overflowRow.setUserId(row.getUserId());
         overflowRow.setSeq(seq);
-        overflowRow.setPlannedEffort(carriedEffort);
+        // 工期跨月共用：顺延行带原工期（非剩余），排满判定按组内跨月格子之和
+        overflowRow.setPlannedEffort(plannedEffort);
         overflowRow.setStatus(ROW_TODO);
         overflowRow.setIsOverflow(1);
         scheduleRowMapper.insert(overflowRow);
@@ -644,21 +755,12 @@ public class ScheduleServiceImpl implements ScheduleService {
     /**
      * 复制行结果 VO 构造
      */
-    private CopyRowResultVO toCopyResult(Long monthId, boolean inserted) {
+    private CopyRowResultVO toCopyResult(Long monthId, boolean duplicated, int insertedCount) {
         CopyRowResultVO vo = new CopyRowResultVO();
         vo.setMonthId(monthId);
-        vo.setDuplicated(inserted);
+        vo.setDuplicated(duplicated);
+        vo.setInsertedCount(insertedCount);
         return vo;
-    }
-
-    /**
-     * 需求状态条件更新（eq status 防并发覆盖，如期间被取消/归档），返回是否实际更新
-     */
-    private boolean advanceStatus(Long requirementId, String expect, String target) {
-        return requirementMapper.update(null, new LambdaUpdateWrapper<Requirement>()
-                .eq(Requirement::getId, requirementId)
-                .eq(Requirement::getStatus, expect)
-                .set(Requirement::getStatus, target)) > 0;
     }
 
     /**
@@ -786,9 +888,10 @@ public class ScheduleServiceImpl implements ScheduleService {
     }
 
     /**
-     * 排期行实体 -> 视图 VO
+     * 排期行实体 -> 视图 VO（scheduledSum = 组内跨全部月份已排合计，前端"已排"列与状态派生用）
      */
-    private ScheduleViewVO.RowVO toRowVO(ScheduleRow row, List<ScheduleCell> cells, Map<Long, String> nameMap) {
+    private ScheduleViewVO.RowVO toRowVO(ScheduleRow row, List<ScheduleCell> cells, Map<Long, String> nameMap,
+                                         BigDecimal scheduledSum) {
         ScheduleViewVO.RowVO vo = new ScheduleViewVO.RowVO();
         vo.setRowId(row.getId());
         vo.setCraft(row.getCraft());
@@ -797,11 +900,19 @@ public class ScheduleServiceImpl implements ScheduleService {
         vo.setStatus(row.getStatus());
         vo.setIsOverflow(row.getIsOverflow());
         vo.setPlannedEffort(row.getPlannedEffort());
+        vo.setScheduledSum(scheduledSum);
         vo.setUpdatedAt(toMillis(row.getUpdatedAt()));
         Map<String, BigDecimal> cellMap = new LinkedHashMap<>();
         cells.forEach(cell -> cellMap.put(cell.getDay().toString(), cell.getValue()));
         vo.setCells(cellMap);
         return vo;
+    }
+
+    /**
+     * 排期组键：同需求×工种×负责人（跨全部月份共用工期与已排统计）
+     */
+    private String groupKey(Long requirementId, String craft, Long userId) {
+        return requirementId + ":" + craft + ":" + userId;
     }
 
     /**
