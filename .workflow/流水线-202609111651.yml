@@ -12,23 +12,27 @@ stages:
     displayName: 后端 Maven 构建与测试
     jdkVersion: "17"
     mavenVersion: "3.9"
-    mavenSettings: "settings.xml"
-    goals: "-B clean package"
+    commands:
+    - mvn -B clean package -s ./settings.xml
+    caches:
+    - "~/.m2"
     artifacts:
-    - name: backend-jar
-      path: backend/target/*.jar
+    - name: build_result
+      path:
+      - ./backend/target
   - step: build@nodejs
     name: frontend_build
     displayName: 前端 Node 构建
-    nodeVersion: "20"
-    npmRegistry: "https://registry.npmmirror.com"
+    nodeVersion: 20.11.1
     commands:
-    - npm ci || npm install
-    - npm run build
-    workDir: "frontend"
+    - cd frontend && npm ci --registry=https://registry.npmmirror.com
+    - cd frontend && npm run build
+    caches:
+    - "~/.npm"
     artifacts:
-    - name: frontend-dist
-      path: frontend/dist/**
+    - name: dist_result
+      path:
+      - ./frontend/dist
 - name: Deploy To Aliyun
   displayName: 部署到阿里云主机
   strategy: naturally
@@ -63,9 +67,7 @@ stages:
       /bin/bash scripts/deploy.sh "$BRANCH"
     gitClone: "false"
     hostGroupID:
-      # 复用 Cloudland 已建好的主机组（同一台阿里云服务器）
       ID: ali_cloudland
-      # 留空 = 自动选择主机组内任意一台主机
       hostID: []
     notify: []
     strategy:
