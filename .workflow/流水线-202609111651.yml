@@ -1,0 +1,79 @@
+version: "1.0"
+name: pm-system-deploy
+displayName: pm-system-deploy
+stages:
+- name: Build On Cloud
+  displayName: 云端构建（Maven + Node）
+  strategy: naturally
+  trigger: auto
+  steps:
+  - step: build@maven
+    name: backend_build
+    displayName: 后端 Maven 构建与测试
+    jdkVersion: "17"
+    mavenVersion: "3.9"
+    mavenSettings: "settings.xml"
+    goals: "-B clean package"
+    artifacts:
+    - name: backend-jar
+      path: backend/target/*.jar
+  - step: build@nodejs
+    name: frontend_build
+    displayName: 前端 Node 构建
+    nodeVersion: "20"
+    npmRegistry: "https://registry.npmmirror.com"
+    commands:
+    - npm ci || npm install
+    - npm run build
+    workDir: "frontend"
+    artifacts:
+    - name: frontend-dist
+      path: frontend/dist/**
+- name: Deploy To Aliyun
+  displayName: 部署到阿里云主机
+  strategy: naturally
+  trigger: auto
+  dependsOn:
+  - Build On Cloud
+  executor:
+  - t1longlive
+  steps:
+  - step: shell@agent
+    name: deploy_aliyun
+    displayName: 执行部署脚本
+    schedulerType: DISTRIBUTED
+    scriptType: SH
+    script: |-
+      set -Eeuo pipefail
+
+      APP_DIR="/root/pm-system"
+      BRANCH="main"
+
+      if [ ! -d "$APP_DIR/.git" ]; then
+        echo ">> 首次部署：克隆仓库到 $APP_DIR"
+        mkdir -p "$(dirname "$APP_DIR")"
+        git clone -b "$BRANCH" "$GITEE_REPO_URL" "$APP_DIR"
+      fi
+
+      cd "$APP_DIR"
+      git fetch origin "$BRANCH"
+      git checkout "$BRANCH"
+      git reset --hard "origin/$BRANCH"
+
+      /bin/bash scripts/deploy.sh "$BRANCH"
+    gitClone: "false"
+    hostGroupID:
+      ID: ali_pm_system
+      hostID: []
+    notify: []
+    strategy:
+      retry: "0"
+triggers:
+  trigger: auto
+  push:
+    branches:
+      prefix:
+      - main
+      precise: []
+      include: []
+notify: []
