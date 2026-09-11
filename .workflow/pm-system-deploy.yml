@@ -2,73 +2,41 @@ version: "1.0"
 name: pm-system-deploy
 displayName: pm-system-deploy
 stages:
-# ======================================================================
-# Stage 1 — 云端构建（Build）
-# ----------------------------------------------------------------------
-# 这里是本项目与 Cloudland 的关键差异：
-#   Cloudland = Pull 模式：流水线只触发，服务器自己 git pull + build
-#   本项目     = Push 模式：云端 Runner 构建，产物交付到服务器
-#
-# Gitee Go 的 build@maven / build@nodejs 步骤跑在托管的云端构建机上，
-# 仓库已被自动 clone 到云端工作区根目录。
-# ======================================================================
-- name: Build On Cloud
+- name: 云端构建（Maven + Node）
   displayName: 云端构建（Maven + Node）
   strategy: naturally
   trigger: auto
   steps:
-  # ---------- 后端：Maven 编译 + 单元测试 + 打包 ----------
   - step: build@maven
     name: backend_build
     displayName: 后端 Maven 构建与测试
-    # jdkVersion 与 backend/pom.xml 的 java.version=17 保持一致
     jdkVersion: "17"
     mavenVersion: "3.9"
-    # 用仓库自带 settings.xml（已配置阿里云镜像，云端拉依赖更快）
-    mavenSettings: "settings.xml"
-    # -B 批处理模式（日志干净）；不跳过测试，让 CI 真正跑单测
-    goals: "-B clean package"
-    # 产物目录：Gitee 会在 stage 结束后归档这里的内容
     artifacts:
     - name: backend-jar
       path: backend/target/*.jar
-  # ---------- 前端：Node 编译 + 打包 ----------
+      type: .tar.gz
   - step: build@nodejs
     name: frontend_build
     displayName: 前端 Node 构建
     nodeVersion: "20"
-    # 走 npmmirror，云端构建机上拉依赖速度更快更稳
-    npmRegistry: "https://registry.npmmirror.com"
-    # 先装依赖（优先用 lock 文件，保证可复现），再执行构建
     commands:
     - npm ci || npm install
     - npm run build
-    # 前端工作目录（monorepo：源码在 frontend/ 下）
-    workDir: "frontend"
     artifacts:
     - name: frontend-dist
       path: frontend/dist/**
-# ======================================================================
-# Stage 2 — 交付部署（Deliver / Deploy）
-# ----------------------------------------------------------------------
-# 产物在 Stage 1 已经构建完成，本阶段只做"把镜像/代码落到服务器并重启"。
-# shell@agent + hostGroupID = Gitee Go 的自有主机部署能力：
-#   它会 SSH 登录到你预先注册的主机组，执行下面的脚本。
-# ======================================================================
-- name: Deploy To Aliyun
+      type: .tar.gz
+- name: 部署到阿里云主机
   displayName: 部署到阿里云主机
   strategy: naturally
   trigger: auto
-  # 只有 Build 阶段成功才会执行部署，避免用坏产物覆盖线上
-  dependsOn:
-  - Build On Cloud
   executor:
   - t1longlive
   steps:
   - step: shell@agent
     name: deploy_aliyun
     displayName: 执行部署脚本
-    # DISTRIBUTED = 分配到主机组的任意一台空闲主机
     schedulerType: DISTRIBUTED
     scriptType: SH
     script: |-
@@ -91,12 +59,11 @@ stages:
 
       # 部署脚本内部：flock 并发保护 + compose build + 健康检查
       /bin/bash scripts/deploy.sh "$BRANCH"
-    # gitClone: "false" —— 不需要 Gitee 额外克隆代码到主机，
-    # 主机上的代码由上面脚本自己 git pull 维护（与 Cloudland 一致）
     gitClone: "false"
     hostGroupID:
-      ID: ali_pm_system
-      hostID: []
+      ID: ali_cloudland
+      hostID:
+      - 844d9abd-3fd6-4e32-99ee-3339f2497a55
     notify: []
     strategy:
       retry: "0"
