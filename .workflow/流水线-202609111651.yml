@@ -63,7 +63,9 @@ stages:
       /bin/bash scripts/deploy.sh "$BRANCH"
     gitClone: "false"
     hostGroupID:
-      ID: ali_pm_system
+      # 复用 Cloudland 已建好的主机组（同一台阿里云服务器）
+      ID: ali_cloudland
+      # 留空 = 自动选择主机组内任意一台主机
       hostID: []
     notify: []
     strategy:
