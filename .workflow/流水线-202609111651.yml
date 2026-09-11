@@ -1,83 +1,103 @@
-version: "1.0"
+version: '1.0'
 name: pm-system-deploy
 displayName: pm-system-deploy
-stages:
-- name: Build On Cloud
-  displayName: 云端构建（Maven + Node）
-  strategy: naturally
-  trigger: auto
-  steps:
-  - step: build@maven
-    name: backend_build
-    displayName: 后端 Maven 构建与测试
-    jdkVersion: "17"
-    mavenVersion: "3.9"
-    commands:
-    - mvn -B clean package -s ./settings.xml
-    caches:
-    - "~/.m2"
-    artifacts:
-    - name: build_result
-      path:
-      - ./backend/target
-  - step: build@nodejs
-    name: frontend_build
-    displayName: 前端 Node 构建
-    nodeVersion: 20.11.1
-    commands:
-    - cd frontend && npm ci --registry=https://registry.npmmirror.com
-    - cd frontend && npm run build
-    caches:
-    - "~/.npm"
-    artifacts:
-    - name: dist_result
-      path:
-      - ./frontend/dist
-- name: Deploy To Aliyun
-  displayName: 部署到阿里云主机
-  strategy: naturally
-  trigger: auto
-  dependsOn:
-  - Build On Cloud
-  executor:
-  - t1longlive
-  steps:
-  - step: shell@agent
-    name: deploy_aliyun
-    displayName: 执行部署脚本
-    schedulerType: DISTRIBUTED
-    scriptType: SH
-    script: |-
-      set -Eeuo pipefail
-
-      APP_DIR="/root/pm-system"
-      BRANCH="main"
-
-      if [ ! -d "$APP_DIR/.git" ]; then
-        echo ">> 首次部署：克隆仓库到 $APP_DIR"
-        mkdir -p "$(dirname "$APP_DIR")"
-        git clone -b "$BRANCH" "$GITEE_REPO_URL" "$APP_DIR"
-      fi
-
-      cd "$APP_DIR"
-      git fetch origin "$BRANCH"
-      git checkout "$BRANCH"
-      git reset --hard "origin/$BRANCH"
-
-      /bin/bash scripts/deploy.sh "$BRANCH"
-    gitClone: "false"
-    hostGroupID:
-      ID: ali_cloudland
-      hostID: []
-    notify: []
-    strategy:
-      retry: "0"
 triggers:
   trigger: auto
   push:
     branches:
-      prefix:
-      - main
-      precise: []
-      include: []
+      precise:
+        - main
+stages:
+  - name: build
+    displayName: 云端构建（后端 Maven + 前端 Node）
+    strategy: naturally
+    trigger: auto
+    executor: []
+    steps:
+      - step: build@maven
+        name: backend_build
+        displayName: 后端 Maven 构建与测试
+        jdkVersion: '17'
+        mavenVersion: 3.9.6
+        commands:
+          - '# 先做环境自检，日志里能直接看到真实路径与版本，便于定位问题'
+          - pwd
+          - ls -la
+          - java -version
+          - mvn -v
+          - '# 仓库根目录为工作目录：后端不在根目录，必须先进入 backend'
+          - cd backend
+          - mvn -B clean package -s ./settings.xml
+        artifacts:
+          - name: BUILD_ARTIFACT
+            path:
+              - ./backend/target
+        caches:
+          - ~/.m2
+        notify: []
+        strategy:
+          retry: '0'
+      - step: build@nodejs
+        name: frontend_build
+        displayName: 前端 Node 构建
+        nodeVersion: 20.19.0
+        commands:
+          - '# 先做环境自检'
+          - pwd
+          - ls -la
+          - node -v
+          - npm -v
+          - '# 仓库根目录为工作目录：前端不在根目录，必须先进入 frontend'
+          - cd frontend
+          - npm ci --registry=https://registry.npmmirror.com
+          - npm run build
+        artifacts:
+          - name: DIST_ARTIFACT
+            path:
+              - ./frontend/dist
+        caches:
+          - ~/.npm
+        notify: []
+        strategy:
+          retry: '0'
+  - name: deploy
+    displayName: 部署到阿里云主机
+    strategy: naturally
+    trigger: auto
+    dependsOn:
+      - build
+    executor:
+      - t1longlive
+    steps:
+      - step: shell@agent
+        name: deploy_aliyun
+        displayName: 执行部署脚本
+        schedulerType: DISTRIBUTED
+        scriptType: SH
+        script: |-
+          set -Eeuo pipefail
+
+          APP_DIR="/root/pm-system"
+          BRANCH="main"
+          REPO_URL="https://gitee.com/t1longlive/pm-system.git"
+
+          if [ ! -d "$APP_DIR/.git" ]; then
+            echo ">> 首次部署：克隆仓库到 $APP_DIR"
+            mkdir -p "$(dirname "$APP_DIR")"
+            git clone -b "$BRANCH" "$REPO_URL" "$APP_DIR"
+          fi
+
+          cd "$APP_DIR"
+          git fetch origin "$BRANCH"
+          git checkout "$BRANCH"
+          git reset --hard "origin/$BRANCH"
+
+          /bin/bash scripts/deploy.sh "$BRANCH"
+        gitClone: 'false'
+        hostGroupID:
+          ID: ali_cloudland
+          hostID: []
+        notify: []
+        strategy:
+          retry: '0'
 notify: []
