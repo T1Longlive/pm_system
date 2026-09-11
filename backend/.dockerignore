@@ -1,0 +1,17 @@
+target/
+*.jar
+*.war
+
+.idea/
+.vscode/
+.trae/
+.mimocode/
+.workbuddy/
+
+*.log
+logs/
+
+.git/
+.gitignore
+docs/
+frontend/node_modules/

@@ -2,6 +2,7 @@ package com.pm.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.toolkit.support.SFunction;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.pm.common.BizException;
 import com.pm.dto.AttachmentDTO;
@@ -9,11 +10,13 @@ import com.pm.dto.BugCreateDTO;
 import com.pm.dto.BugImageAddDTO;
 import com.pm.dto.BugUpdateDTO;
 import com.pm.entity.Attachment;
+import com.pm.entity.BizOperationLog;
 import com.pm.entity.Bug;
 import com.pm.entity.Project;
 import com.pm.entity.ProjectMember;
 import com.pm.entity.User;
 import com.pm.mapper.AttachmentMapper;
+import com.pm.mapper.BizOperationLogMapper;
 import com.pm.mapper.BugMapper;
 import com.pm.mapper.ProjectMapper;
 import com.pm.mapper.ProjectMemberMapper;
@@ -78,6 +81,7 @@ public class BugServiceImpl implements BugService {
     private final ProjectMemberMapper projectMemberMapper;
     private final UserMapper userMapper;
     private final AttachmentMapper attachmentMapper;
+    private final BizOperationLogMapper operationLogMapper;
     private final StringRedisTemplate stringRedisTemplate;
 
     @Override
@@ -130,6 +134,8 @@ public class BugServiceImpl implements BugService {
         bug.setArchived(0);
         bug.setCreatedBy(userId);
         bugMapper.insert(bug);
+        // 留痕：创建 Bug
+        writeLog(bug, userId, "CREATE", "创建 Bug（测试人：本人）");
         return assembleVOs(userId, List.of(bug)).get(0);
     }
 
@@ -148,64 +154,88 @@ public class BugServiceImpl implements BugService {
         }
 
         // 逐格部分更新：清空哨兵 null=不修改、字符串 ""=清空、数值/ID 0=清空；
-        // 统一 UpdateWrapper 显式 set（updateById 会忽略 null，无法表达清空）
+        // 统一 UpdateWrapper 显式 set（updateById 会忽略 null，无法表达清空）；
+        // 提交值归一化后与库中旧值比较，仅真正变化的字段才 set（避免重复提交相同值刷 UPDATE 日志）
         LambdaUpdateWrapper<Bug> wrapper = new LambdaUpdateWrapper<Bug>().eq(Bug::getId, bugId);
         boolean changed = false;
-        if (dto.getVersion() != null) {
-            wrapper.set(Bug::getVersion, dto.getVersion().isBlank() ? null : dto.getVersion());
-            changed = true;
-        }
-        if (dto.getFeature() != null) {
-            wrapper.set(Bug::getFeature, dto.getFeature().isBlank() ? null : dto.getFeature());
-            changed = true;
-        }
-        if (dto.getDescription() != null) {
-            wrapper.set(Bug::getDescription, dto.getDescription().isBlank() ? null : dto.getDescription());
-            changed = true;
-        }
-        if (dto.getPriority() != null) {
-            wrapper.set(Bug::getPriority, dto.getPriority() == 0 ? null : dto.getPriority());
-            changed = true;
-        }
-        if (dto.getOwnerId() != null) {
-            wrapper.set(Bug::getOwnerId, dto.getOwnerId() == 0 ? null : dto.getOwnerId());
-            changed = true;
-        }
-        if (dto.getTesterId() != null) {
-            wrapper.set(Bug::getTesterId, dto.getTesterId() == 0 ? null : dto.getTesterId());
-            changed = true;
-        }
-        if (dto.getHandleStatus() != null) {
-            wrapper.set(Bug::getHandleStatus, dto.getHandleStatus().isEmpty() ? null : dto.getHandleStatus());
-            changed = true;
-        }
-        if (dto.getAcceptStatus() != null) {
-            wrapper.set(Bug::getAcceptStatus, dto.getAcceptStatus().isEmpty() ? null : dto.getAcceptStatus());
-            changed = true;
-        }
-        if (dto.getSolution() != null) {
-            wrapper.set(Bug::getSolution, dto.getSolution().isBlank() ? null : dto.getSolution());
-            changed = true;
-        }
-        if (dto.getDevRemark() != null) {
-            wrapper.set(Bug::getDevRemark, dto.getDevRemark().isBlank() ? null : dto.getDevRemark());
-            changed = true;
-        }
-        if (dto.getTestRemark() != null) {
-            wrapper.set(Bug::getTestRemark, dto.getTestRemark().isBlank() ? null : dto.getTestRemark());
-            changed = true;
-        }
+        List<String> changedFields = new ArrayList<>();
+        if (dto.getVersion() != null && putIfChanged(wrapper, Bug::getVersion,
+                blankToNull(dto.getVersion()), bug.getVersion(), changedFields, "版本")) changed = true;
+        if (dto.getFeature() != null && putIfChanged(wrapper, Bug::getFeature,
+                blankToNull(dto.getFeature()), bug.getFeature(), changedFields, "功能模块")) changed = true;
+        if (dto.getDescription() != null && putIfChanged(wrapper, Bug::getDescription,
+                blankToNull(dto.getDescription()), bug.getDescription(), changedFields, "问题描述")) changed = true;
+        if (dto.getPriority() != null && putIfChanged(wrapper, Bug::getPriority,
+                zeroToNull(dto.getPriority()), bug.getPriority(), changedFields, "优先级")) changed = true;
+        if (dto.getOwnerId() != null && putIfChanged(wrapper, Bug::getOwnerId,
+                zeroToNull(dto.getOwnerId()), bug.getOwnerId(), changedFields, "负责人")) changed = true;
+        if (dto.getTesterId() != null && putIfChanged(wrapper, Bug::getTesterId,
+                zeroToNull(dto.getTesterId()), bug.getTesterId(), changedFields, "测试人")) changed = true;
+        if (dto.getHandleStatus() != null && putIfChanged(wrapper, Bug::getHandleStatus,
+                emptyToNull(dto.getHandleStatus()), bug.getHandleStatus(), changedFields, "处理进度")) changed = true;
+        if (dto.getAcceptStatus() != null && putIfChanged(wrapper, Bug::getAcceptStatus,
+                emptyToNull(dto.getAcceptStatus()), bug.getAcceptStatus(), changedFields, "验收进度")) changed = true;
+        if (dto.getSolution() != null && putIfChanged(wrapper, Bug::getSolution,
+                blankToNull(dto.getSolution()), bug.getSolution(), changedFields, "解决方案")) changed = true;
+        if (dto.getDevRemark() != null && putIfChanged(wrapper, Bug::getDevRemark,
+                blankToNull(dto.getDevRemark()), bug.getDevRemark(), changedFields, "开发备注")) changed = true;
+        if (dto.getTestRemark() != null && putIfChanged(wrapper, Bug::getTestRemark,
+                blankToNull(dto.getTestRemark()), bug.getTestRemark(), changedFields, "测试备注")) changed = true;
+        boolean videoChanged = false;
         if (dto.getVideoUrl() != null) {
-            wrapper.set(Bug::getVideoUrl, dto.getVideoUrl().isBlank() ? null : dto.getVideoUrl());
-            changed = true;
+            videoChanged |= putIfChanged(wrapper, Bug::getVideoUrl,
+                    blankToNull(dto.getVideoUrl()), bug.getVideoUrl(), changedFields, "视频");
         }
         if (dto.getVideoName() != null) {
-            wrapper.set(Bug::getVideoName, dto.getVideoName().isBlank() ? null : dto.getVideoName());
-            changed = true;
+            videoChanged |= putIfChanged(wrapper, Bug::getVideoName,
+                    blankToNull(dto.getVideoName()), bug.getVideoName(), changedFields, null);
         }
+        if (videoChanged) changed = true;
+
         if (changed) {
             bugMapper.update(null, wrapper);
+            // 留痕：编辑 Bug（仅记录真正变化的字段，逐格编辑通常只含一两个）
+            writeLog(bug, userId, "UPDATE", "编辑 Bug：" + String.join("、", changedFields));
         }
+    }
+
+    /** 字符串归一化：空白（含空串）→ null（清空哨兵） */
+    private String blankToNull(String v) {
+        return v == null || v.isBlank() ? null : v;
+    }
+
+    /** 空串归一化："" → null（进度枚举的清空哨兵，与 blankToNull 区分语义） */
+    private String emptyToNull(String v) {
+        return v == null || v.isEmpty() ? null : v;
+    }
+
+    /** 数值归一化：0 → null（清空哨兵） */
+    private Integer zeroToNull(Integer v) {
+        return v == null || v == 0 ? null : v;
+    }
+
+    /** 数值归一化：0 → null（清空哨兵），Long 重载 */
+    private Long zeroToNull(Long v) {
+        return v == null || v == 0 ? null : v;
+    }
+
+    /**
+     * 归一化后的新值与旧值不同才写入 set 并记录字段名；
+     * name 传 null 表示仅 set 不记录（用于视频名称随视频地址合并为一个字段名）。
+     *
+     * @return 是否发生了变化
+     */
+    private <T> boolean putIfChanged(LambdaUpdateWrapper<Bug> wrapper,
+                                     SFunction<Bug, ?> column, T newVal, T oldVal,
+                                     List<String> changedFields, String name) {
+        if (java.util.Objects.equals(newVal, oldVal)) {
+            return false;
+        }
+        wrapper.set(column, newVal);
+        if (name != null) {
+            changedFields.add(name);
+        }
+        return true;
     }
 
     @Override
@@ -225,6 +255,8 @@ public class BugServiceImpl implements BugService {
         update.setArchivedAt(LocalDateTime.now());
         update.setArchivedBy(userId);
         bugMapper.updateById(update);
+        // 留痕：归档 Bug
+        writeLog(bug, userId, "ARCHIVE", "归档 Bug：" + bug.getBugNo());
     }
 
     @Override
@@ -247,12 +279,16 @@ public class BugServiceImpl implements BugService {
                 // 重新打开置空处理进度与验收进度
                 .set(Bug::getHandleStatus, null)
                 .set(Bug::getAcceptStatus, null));
+        // 留痕：重新打开 Bug
+        writeLog(bug, userId, "RESTORE", "重新打开 Bug：" + bug.getBugNo());
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void deleteBug(Long userId, Long bugId) {
-        requireBug(bugId);
+        Bug bug = requireBug(bugId);
+        // 留痕：删除 Bug（删除前记录，删除后业务行不存在）
+        writeLog(bug, userId, "DELETE", "删除 Bug：" + bug.getBugNo());
         // 所有人可删（归档行也可删）：连带删除截图附件记录
         attachmentMapper.delete(new LambdaQueryWrapper<Attachment>()
                 .eq(Attachment::getBizType, BIZ_TYPE)
@@ -287,6 +323,8 @@ public class BugServiceImpl implements BugService {
             attachmentMapper.insert(row);
             ids.add(row.getId());
         }
+        // 留痕：上传截图
+        writeLog(bug, userId, "ADD_IMAGE", "上传截图 " + ids.size() + " 张：" + bug.getBugNo());
         return ids;
     }
 
@@ -303,6 +341,24 @@ public class BugServiceImpl implements BugService {
             throw new BizException(404, "图片不存在");
         }
         attachmentMapper.deleteById(attachmentId);
+        // 留痕：删除截图
+        writeLog(bug, userId, "DELETE_IMAGE",
+                "删除截图（" + (attachment.getFileName() == null ? attachment.getId() : attachment.getFileName()) + "）：" + bug.getBugNo());
+    }
+
+    /**
+     * 写操作日志（biz_type=BUG，round_no 恒 1；project_id 回填供日志按项目过滤权限）
+     */
+    private void writeLog(Bug bug, Long operatorId, String action, String remark) {
+        BizOperationLog log = new BizOperationLog();
+        log.setBizType(BIZ_TYPE);
+        log.setBizId(bug.getId());
+        log.setProjectId(bug.getProjectId());
+        log.setOperatorId(operatorId);
+        log.setAction(action);
+        log.setRoundNo(1);
+        log.setRemark(remark);
+        operationLogMapper.insert(log);
     }
 
     // ==================== 列表批量装配 ====================

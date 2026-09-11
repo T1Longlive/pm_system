@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+*.log
+
+.idea/
+.vscode/
+.trae/
+.mimocode/
+.workbuddy/
+
+.git/
+.gitignore

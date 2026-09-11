@@ -17,6 +17,9 @@ public class UserVO {
     /** 0普通成员 1管理员 */
     private Integer isAdmin;
 
+    /** 1=是任一项目的项目经理（创建者） */
+    private Integer isPm;
+
     /** 1需强制修改密码 */
     private Integer forceChangePwd;
 }

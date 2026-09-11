@@ -35,7 +35,7 @@ public interface RequirementService {
     /**
      * 需求操作日志时间线（id 倒序）
      */
-    List<OperationLogVO> listLogs(Long requirementId);
+    List<OperationLogVO> listLogs(Long requirementId, Long userId);
 
     /**
      * 创建需求（该项目 PM 或 PLANNER 工种成员），初始状态 PENDING，返回新需求 id。

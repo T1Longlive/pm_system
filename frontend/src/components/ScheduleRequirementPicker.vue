@@ -35,11 +35,11 @@ const selectedId = ref<number | null>(null)
 // 提交按钮 loading
 const submitting = ref(false)
 
-// 拉取需求池（排除终态；一次拉取一百条，超出部分一期不考虑）
+// 拉取需求池（排除终态；一次拉取五百条，覆盖绝大多数场景）
 const fetchList = async () => {
   loading.value = true
   try {
-    const res = await listRequirements({ excludeTerminal: true, page: 1, size: 100 })
+    const res = await listRequirements({ excludeTerminal: true, page: 1, size: 500 })
     list.value = res.data.data.records
   } catch {
     // 失败已由拦截器统一提示

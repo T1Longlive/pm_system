@@ -79,6 +79,12 @@ const router = createRouter({
           meta: { title: '统计报表' }
         },
         {
+          path: 'operation-logs',
+          name: 'OperationLogs',
+          component: () => import('@/views/module/OperationLogs.vue'),
+          meta: { title: '操作日志', pmOrAdmin: true }
+        },
+        {
           path: 'admin/users',
           name: 'AdminUsers',
           component: () => import('@/views/module/AdminUsers.vue'),
@@ -98,6 +104,10 @@ const router = createRouter({
 // 全局前置守卫：无 token（未登录）一律重定向到登录页；刷新后 userInfo 缺失时回填
 router.beforeEach(async (to) => {
   const userStore = useUserStore()
+  // 自愈漂移：pinia 有 token 但 localStorage 已被清（401 过期/手动清除）→ 同步登出状态
+  if (userStore.token && !localStorage.getItem('token')) {
+    userStore.logout()
+  }
   if (to.path !== '/login' && !userStore.token) {
     return { path: '/login' }
   }

@@ -23,6 +23,9 @@ public class BizOperationLog {
 
     private Long bizId;
 
+    /** 所属项目（日志按项目过滤查询权限用；写入时回填） */
+    private Long projectId;
+
     /** 操作人 */
     private Long operatorId;
 

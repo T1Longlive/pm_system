@@ -4,6 +4,8 @@ import ElementPlus from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import 'element-plus/dist/index.css'
+// 主题覆盖：primary 浅蓝改深蓝（须在 element css 之后引入）
+import './styles/theme.css'
 
 import App from './App.vue'
 import router from './router'

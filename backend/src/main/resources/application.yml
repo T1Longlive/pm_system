@@ -1,50 +1,62 @@
 # 项目管理系统后端配置
+#
+# 配置外置原则（12-Factor App · 第 3 条 Config）：
+#   所有随环境而变的配置一律写成 ${环境变量:本地默认值}。
+#   本地开发不设环境变量即可直接跑；容器/CI 环境由 .env 或 compose 注入。
+#   任何密码、密钥都不要写死在这里 —— 本文件会被提交进版本库。
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
 
 spring:
   application:
     name: pm-backend
   datasource:
-    # MySQL 数据源（本机 pm_system 库）
-    url: jdbc:mysql://localhost:3306/pm_system?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
-    username: root
-    password: 123456
+    # MySQL 数据源
+    url: ${DB_URL:jdbc:mysql://localhost:3306/pm_system?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
   data:
     redis:
       # Redis：需求/Bug 编号流水号、统计缓存使用
-      host: localhost
-      port: 6379
-      database: 0
-      # 本机 Redis 已开启密码认证
-      password: 123456
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      database: ${REDIS_DATABASE:0}
+      password: ${REDIS_PASSWORD:123456}
   servlet:
     multipart:
       # 附件上传大小上限：文档类 ≤50MB（Service 层白名单校验），
       # 此处略放宽到 60MB 以便超大文件也能收到明确的业务 400 提示而非系统异常
       max-file-size: 60MB
       max-request-size: 65MB
+  # 允许挂载外部本地配置文件覆盖（容器内为 /app/config/application-local.yml）
+  config:
+    import: optional:file:./config/application-local.yml
 
 # MyBatis-Plus 配置
 mybatis-plus:
   configuration:
     # 数据库下划线列名 <-> Java 驼峰属性 自动映射
     map-underscore-to-camel-case: true
-    # 开发环境打印 SQL 到控制台（生产环境请移除该配置）
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    # 开发环境打印 SQL 到控制台（生产环境通过 SQL_LOG_IMPL 环境变量关闭）
+    log-impl: ${SQL_LOG_IMPL:org.apache.ibatis.logging.stdout.StdOutImpl}
   global-config:
     # 关闭 MyBatis-Plus 启动 banner
     banner: false
 
 # JWT 配置
 jwt:
-  # 签名密钥：HS256 要求至少 32 字符，生产环境请务必更换
-  secret: pm-system-jwt-secret-key-change-me-in-production-0123456789abcdef
+  # 签名密钥：HS256 要求至少 32 字符，生产环境务必通过 JWT_SECRET 注入
+  secret: ${JWT_SECRET:pm-system-jwt-secret-key-change-me-in-production-0123456789abcdef}
   # token 有效期（分钟），7200 分钟 = 5 天
-  expire: 7200
+  expire: ${JWT_EXPIRE:7200}
 
 # 附件存储配置
 pm:
   # 附件存储根目录：按 {yyyy}/{MM}/{uuid}.{ext} 子目录组织，经 /upload/** 静态映射对外访问
-  upload-dir: D:/pm-upload
+  upload-dir: ${PM_UPLOAD_DIR:D:/pm-upload}
+
+# 跨域白名单（逗号分隔），由 WebConfig 读取
+# 生产环境经 nginx 同源反向代理，浏览器眼中前后端同源，无需跨域；
+# 默认值仅覆盖本地开发端口，不要在生产放开为 *
+CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:8081}

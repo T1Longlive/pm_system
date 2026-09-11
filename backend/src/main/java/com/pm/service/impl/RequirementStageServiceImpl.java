@@ -186,6 +186,7 @@ public class RequirementStageServiceImpl implements RequirementStageService {
         BizOperationLog logRow = new BizOperationLog();
         logRow.setBizType(BIZ_TYPE);
         logRow.setBizId(req.getId());
+        logRow.setProjectId(req.getProjectId());
         logRow.setOperatorId(operatorId);
         logRow.setAction("STAGE_SYNC");
         logRow.setRoundNo(1);

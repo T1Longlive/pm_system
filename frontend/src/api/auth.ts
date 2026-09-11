@@ -14,6 +14,8 @@ export interface LoginResult {
   realName: string
   // 是否管理员：1是 0否
   isAdmin: number
+  // 是否任一项目的项目经理（创建者）：1是 0否
+  isPm: number
   // 是否需要强制修改密码（首次登录 / 管理员重置后）：1是 0否
   forceChangePwd: number
 }
@@ -30,6 +32,8 @@ export interface UserInfo {
   username: string
   realName: string
   isAdmin: number
+  // 是否任一项目的项目经理（创建者）：1是 0否（PM 专属入口显隐用）
+  isPm: number
   // 是否需要强制修改密码：1是 0否
   forceChangePwd: number
 }

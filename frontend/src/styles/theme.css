@@ -1,0 +1,12 @@
+/* Element Plus 主题覆盖：系统主色调为蓝色 #1976d2，
+   覆盖 primary 变量梯度后按钮/链接/勾选框/单选/分页/焦点等全局组件随之统一 */
+:root {
+  --el-color-primary: #1976d2;
+  --el-color-primary-dark-2: #1565c0;
+  --el-color-primary-light-3: #4f93dd;
+  --el-color-primary-light-5: #85b6e5;
+  --el-color-primary-light-7: #b8d5ee;
+  --el-color-primary-light-8: #cfe2f4;
+  --el-color-primary-light-9: #e6f1fa;
+  --el-color-primary-rgb: 25, 118, 210;
+}

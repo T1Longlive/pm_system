@@ -75,11 +75,12 @@ public class RequirementController {
     }
 
     /**
-     * 需求操作日志时间线（id 倒序）
+     * 需求操作日志时间线（id 倒序；仅管理员或该项目 PM）
      */
     @GetMapping("/{id}/logs")
-    public Result<List<OperationLogVO>> logs(@PathVariable Long id) {
-        return Result.success(requirementService.listLogs(id));
+    public Result<List<OperationLogVO>> logs(@PathVariable Long id, HttpServletRequest request) {
+        Long userId = (Long) request.getAttribute("userId");
+        return Result.success(requirementService.listLogs(id, userId));
     }
 
     /**

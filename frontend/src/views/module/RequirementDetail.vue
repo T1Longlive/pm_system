@@ -62,6 +62,11 @@ const canCancel = computed(() => !isTerminal.value && isPM.value)
 // 归档按钮显隐：PM，仅待归档状态
 const canArchive = computed(() => detail.value?.status === 'ARCHIVING' && isPM.value)
 
+// 操作日志可见性：仅管理员或该项目 PM（与后端 /requirements/{id}/logs 权限一致）
+const canViewLogs = computed(
+  () => userStore.userInfo?.isAdmin === 1 || isPM.value
+)
+
 // 参与人按工种分组（参与人卡片展示用）
 const groupedParticipants = computed(() => {
   const map = new Map<string, string[]>()
@@ -82,8 +87,9 @@ const fetchDetail = async () => {
   }
 }
 
-// 查询操作日志
+// 查询操作日志（仅管理员/该项目 PM：后端 403 拦截，无权限时不发请求不弹窗）
 const fetchLogs = async () => {
+  if (!canViewLogs.value) return
   try {
     const res = await getRequirementLogs(requirementId)
     logs.value = res.data.data
@@ -94,8 +100,8 @@ const fetchLogs = async () => {
 
 // 刷新详情与日志（操作成功 / 乐观锁冲突后调用）
 const refresh = () => {
-  fetchDetail()
-  fetchLogs()
+  // 先取详情（myRole 决定日志权限），再拉日志
+  fetchDetail().then(fetchLogs)
 }
 
 // 返回需求列表
@@ -180,9 +186,9 @@ const handleArchive = async () => {
   }
 }
 
-// 页面挂载后加载详情与日志
-onMounted(() => {
-  fetchDetail()
+// 页面挂载后加载详情与日志（先详情后日志：日志拉取依赖 myRole 权限判断）
+onMounted(async () => {
+  await fetchDetail()
   fetchLogs()
 })
 </script>
@@ -270,8 +276,8 @@ onMounted(() => {
         <el-empty v-else description="暂无参与人" />
       </el-card>
 
-      <!-- 操作日志：时间线 -->
-      <el-card shadow="never">
+      <!-- 操作日志：时间线（仅管理员/该项目 PM 可见，与后端权限一致） -->
+      <el-card v-if="canViewLogs" shadow="never">
         <template #header><span>操作日志</span></template>
         <el-timeline v-if="logs.length" class="log-timeline">
           <el-timeline-item v-for="log in logs" :key="log.id" :timestamp="log.createdAt" placement="top">

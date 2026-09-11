@@ -48,10 +48,10 @@ const projects = ref<ProjectItem[]>([])
 // 当前选中项目（空串 = 未选择，显示引导页）
 const projectId = ref<number | ''>('')
 
-// 拉取项目下拉数据（一次拉取一百条，超出部分一期不考虑）
+// 拉取项目下拉数据（一次拉取五百条，覆盖绝大多数场景）
 const fetchProjects = async () => {
   try {
-    const res = await listProjects({ page: 1, size: 100 })
+    const res = await listProjects({ page: 1, size: 500 })
     projects.value = res.data.data.records
   } catch {
     // 失败已由拦截器统一提示，项目下拉留空不影响

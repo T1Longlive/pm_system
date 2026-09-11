@@ -6,7 +6,9 @@ import com.pm.dto.ChangePasswordDTO;
 import com.pm.dto.LoginDTO;
 import com.pm.dto.LoginVO;
 import com.pm.dto.UserVO;
+import com.pm.entity.Project;
 import com.pm.entity.User;
+import com.pm.mapper.ProjectMapper;
 import com.pm.mapper.UserMapper;
 import com.pm.security.JwtUtil;
 import com.pm.service.AuthService;
@@ -22,6 +24,7 @@ import org.springframework.stereotype.Service;
 public class AuthServiceImpl implements AuthService {
 
     private final UserMapper userMapper;
+    private final ProjectMapper projectMapper;
     private final JwtUtil jwtUtil;
 
     /** BCrypt 编解码器（无状态工具，直接实例化） */
@@ -44,6 +47,7 @@ public class AuthServiceImpl implements AuthService {
         vo.setUsername(user.getUsername());
         vo.setRealName(user.getRealName());
         vo.setIsAdmin(user.getIsAdmin());
+        vo.setIsPm(isPm(user.getId()));
         // 强制改密标记：1=前端登录后必须先引导用户修改初始密码
         vo.setForceChangePwd(user.getForceChangePwd());
         return vo;
@@ -77,7 +81,18 @@ public class AuthServiceImpl implements AuthService {
         vo.setUsername(user.getUsername());
         vo.setRealName(user.getRealName());
         vo.setIsAdmin(user.getIsAdmin());
+        vo.setIsPm(isPm(user.getId()));
         vo.setForceChangePwd(user.getForceChangePwd());
         return vo;
+    }
+
+    /**
+     * 是否任一项目的项目经理（创建者）：一次 count 查询，供前端渲染 PM 专属入口，
+     * 避免前端按项目列表分页猜测（项目超分页上限时会漏判）
+     */
+    private Integer isPm(Long userId) {
+        Long count = projectMapper.selectCount(
+                new LambdaQueryWrapper<Project>().eq(Project::getCreatorId, userId));
+        return count != null && count > 0 ? 1 : 0;
     }
 }

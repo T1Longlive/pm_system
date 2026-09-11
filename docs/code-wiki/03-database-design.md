@@ -62,7 +62,7 @@
 | project_id | 从属项目（`idx_project_status`） |
 | title / description | 标题 ≤100 字 / 富文本 HTML（MEDIUMTEXT） |
 | priority | 1 高 / 2 中 / 3 低 |
-| status | `PENDING/READY/DEV/TEST/ARCHIVING/ARCHIVED/CANCELLED`，默认 PENDING |
+| status | `PENDING/DEV/TEST/ARCHIVING/ARCHIVED/CANCELLED`（`READY` 为历史遗留值，不再写入）。**派生值**：由排期数据 + 日期投影而来，仅归档/取消为人工落库 |
 | planner_id | 策划人（默认创建人，可改，`idx_planner`） |
 | created_by | 创建人 |
 | cancelled_by / cancelled_at / cancel_reason | 取消留痕 |
@@ -86,9 +86,8 @@
 | month_id / requirement_id / craft / user_id | 唯一键 `uk_month_req_craft_user` 四列；一行 = 该月表中某需求的某工种 × 某负责人 |
 | seq | 当月表内需求展示序号（同一需求的行共用 seq，分组排序用） |
 | planned_effort | DECIMAL(5,2) 计划工期（PM 填，≤999.99，可空）。**跨全部月份共用**：排期组 = 同（需求,工种,负责人）的全部行，任一月保存工期会同步全组 |
-| status | `TODO 待开始 / DONE 已完成 / VOID 作废`（VOID = 参与人被移除等场景，前端灰显） |
-| is_overflow | 1 = 跨月自动顺延生成的行 |
-| done_at / done_by | 完成时间与操作人（本人或 PM 代点） |
+| status | `TODO 待开始 / DONE 已完成 / VOID 作废`（VOID = 参与人被移除等场景，前端灰显）。**注**：`DONE` 已废弃不再写入，行完成态由前端按「工期 vs 已排合计」派生 |
+| done_at / done_by | **已废弃**（状态重构后不再写入，仅保留列） |
 | updated_at | 乐观锁版本 |
 
 ### 2.8 `schedule_cell` — 排期格子
@@ -134,10 +133,14 @@
 
 ### 2.12 `biz_operation_log` — 操作留痕
 
-- 索引 `idx_biz(biz_type, biz_id)`、`idx_operator`。
-- `action`：`CREATE / UPDATE / HANDLE_DONE / ACCEPT_PASS / ACCEPT_REJECT / ARCHIVE / RESTORE / CANCEL / ADD_PARTICIPANT / REMOVE_PARTICIPANT / SCHEDULE_SAVE / NODE_DONE`。
+- 索引 `idx_biz(biz_type, biz_id)`、`idx_operator`、**`idx_project(project_id)`**。
+- **`project_id`**：所属项目（日志按项目过滤权限用，操作日志页据此限定可见范围；管理员全量、PM 仅自己项目）。
+- `biz_type`：`REQUIREMENT / BUG / PROJECT`。
+- `action`：`CREATE / UPDATE / DELETE / CANCEL / ARCHIVE / RESTORE / ADD_PARTICIPANT / REMOVE_PARTICIPANT / SCHEDULE_ADD / SCHEDULE_SAVE / SCHEDULE_REMOVE / SCHEDULE_COPY / NODE_DONE / STAGE_SYNC / ADD_MEMBER / REMOVE_MEMBER / ADD_IMAGE / DELETE_IMAGE`；另有 Bug 预留 `HANDLE_DONE / ACCEPT_PASS / ACCEPT_REJECT`（当前无产生方）。
 - `round_no`：Bug 验收轮次（= 该 bug ACCEPT_REJECT 次数 + 1）；需求恒为 1。
 - `remark`：变更摘要（如「标题已修改；优先级：中→高；参与人 +张三(前端)、-李四(测试)；附件 +2」）。
+
+> `STAGE_SYNC` 为状态派生对账专用动作：仅在**用户触发**的写路径对账时写（定时任务对账无操作人，不写日志）。
 
 ### 2.13 `notification` — 站内通知
 
@@ -167,39 +170,51 @@ notification：receiver_id → user
 
 **排期三级结构**：`schedule_month`（1 : N）`schedule_row`（1 : N）`schedule_cell`；排期行由需求参与人生成，格子按日填写，已排工时 = 格子之和。
 
-## 4. 需求状态机与触发源
+**排期组**：同（需求, 工种, 负责人）跨**全部月份**的行集合。工期组内共用（任一月改工期同步全组）；已排 = 组内跨全部月份格子之和；排满 = 每组有工期且组内跨月合计 ≥ 工期。这是需求状态派生的基本单元。
+
+## 4. 需求状态机（派生化口径）
+
+> **`status` 是「排期数据 + 日期」的派生投影，不是手工维护的物化字段。** 详见 [09-state-derivation.md](09-state-derivation.md)。
 
 ```
- PENDING ──全部行排满(保存时即时,通知)──► READY ──同一次保存连续推进(通知)──► DEV
- (待排期)                                 (已排期)                            (开发中)
-     │                                       │                                  │
-     │  定时任务每小时按同口径兜底存量 READY                                    │ ┌─ 全部开发类行(FE/BE/OPS)
-     │                                       │                                  │ │  格子日<今天(定时任务,通知)
-     ▼                                       ▼                                  ▼ ▼
- CANCELLED ◄──PM 取消(任意非终态)────────────────────── TEST ──全部行(含QA)格子日<今天──► ARCHIVING
- (已取消,终态)                                          (测试中)    (定时任务,通知)      (待归档)
-                                                                                       │ PM 手动归档
-                                                                                       ▼
-                                                                                   ARCHIVED (终态)
+                    ┌── 人工落库决定（仅此两类不参与派生）──┐
+                    │  PM 取消(任意非终态) → CANCELLED(终态) │
+                    │  PM 归档(仅 ARCHIVING) → ARCHIVED(终态)│
+                    └──────────────────────────────────────┘
+
+ 派生规则（deriveStage 纯函数，按排期组数据 + 今天）：
+   PENDING   ← 无非 VOID 排期行，或 任一排期组未排满（无工期/工期≤0/跨月格子合计<工期）
+   DEV       ← 已排满 且 存在非 QA 行 且（有行无格子 或 最大非 QA 格子日 ≥ 今天）   开发窗口未结束
+   TEST      ← 开发窗口已结束 且（有行无格子 或 最大格子日 ≥ 今天，含 QA 行）      测试窗口未结束
+   ARCHIVING ← 全部行（含 QA）的格子日都已是过去                                等待 PM 归档
 ```
 
-| 流转 | 触发源 | 实现位置 |
-|------|------|------|
-| PENDING → READY | 排满即时：全部非 VOID 行有工期且格子合计 ≥ 工期（保存排期时判定，通知参与人） | `ScheduleServiceImpl.saveRow` |
-| READY → DEV | 同一次保存连续推进（通知参与人）；定时任务每小时按同口径兜底存量（不通知） | `ScheduleServiceImpl.saveRow` / `RequirementStatusTask.advanceBySchedule` |
-| DEV → TEST | 定时任务每小时：全部非 QA 非 VOID 行的格子日 < 今天（通知参与人） | `RequirementStatusTask` → `advanceBySchedule` |
-| TEST → ARCHIVING | 定时任务每小时：全部非 VOID 行（含 QA）的格子日 < 今天（通知参与人） | 同上 |
-| ARCHIVING → ARCHIVED | PM 手动归档 | `RequirementServiceImpl.archiveRequirement` |
-| 任意非终态 → CANCELLED | PM 手动取消（原因必填），通知参与人+策划 | `RequirementServiceImpl.cancelRequirement` |
+| 派生结果 | 判定（跨全部月份非 VOID 行聚合的排期组） |
+|------|------|
+| PENDING | `groups.isEmpty()` 或 任一组 `plannedEffort` 为空/≤0 或 `sum(cells) < plannedEffort` |
+| DEV | 全部组排满，且存在非 QA 组，且非 QA 组中存在「组内有空行」或「组内最大格子日 ≥ 今天」 |
+| TEST | 非 QA 组已全部「每行有格子且最大格子日 < 今天」，且全部组（含 QA）中存在「组内有空行」或「最大格子日 ≥ 今天」 |
+| ARCHIVING | 全部组（含 QA）每行有格子且最大格子日 < 今天 |
+
+**写入路径（唯一）**：
+- 排期写路径（加入/移除需求、保存行、复制下月）末尾调 `syncStage(reqId, operatorId)` → 派生 vs 库中不一致则条件更新（`eq 旧状态` 防并发）+ 通知参与人 + 写 `STAGE_SYNC` 日志。
+- 需求编辑改参与人（`applyParticipantDiff`）末尾同样调 `syncStage`。
+- 定时任务 `RequirementStatusTask` 每小时整点 + 启动时调 `syncAllStages()` 全量对账（无操作人，不写日志，仅通知）。
+- 归档/取消由 `RequirementServiceImpl` 直写 status（人工终态，不参与派生）。
+
+**不变式**：
+- 归档/取消是仅有的人工落库状态，`deriveStage` 遇到终态直接沿用、不改写；
+- 条件更新 `WHERE status=旧值` 不可删，否则会与取消/归档并发时覆盖终态；
+- `READY` 不再作为存储阶段：前端筛选已移除，仅后端常量与历史数据兜底。
 
 ## 5. 编号规则
 
 | 业务 | 规则 | 生成方式 |
 |------|------|------|
 | 需求 | `REQ-{项目缩写}-{4位流水}`，如 `REQ-PM-0001` | Redis `INCR seq:req:{projectId}`；key 缺失时先用 `selectMaxSeq`（`MAX(CAST(RIGHT(req_no,4) AS UNSIGNED))`）从 DB 回填（SETNX 防并发覆盖），格式化 `String.format("%04d", seq)` |
-| Bug | `BUG-{项目缩写}-{4位流水}` | 表结构已预留，实现待 Bug 模块 |
+| Bug | `BUG-{项目缩写}-{4位流水}` | 同套路：Redis `INCR seq:bug:{projectId}` + `BugMapper.selectMaxSeq`（`COALESCE` 到 0）回填 |
 
-流水号按项目独立递增；唯一键 `(project_id, req_no)` 兜底。
+流水号按项目独立递增；唯一键 `(project_id, req_no)` / `(project_id, bug_no)` 兜底。
 
 ## 6. 种子数据
 

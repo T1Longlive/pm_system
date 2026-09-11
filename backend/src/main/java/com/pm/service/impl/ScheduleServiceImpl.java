@@ -328,7 +328,7 @@ public class ScheduleServiceImpl implements ScheduleService {
         // 部分删除导致组不再排满同样自动回退（回退后由前端退出拦截强制完成排期）
         stageSyncService.syncStage(requirementId, userId);
         // 留痕 + 通知参与人
-        writeLog(requirementId, userId, "SCHEDULE_REMOVE",
+        writeLog(req, userId, "SCHEDULE_REMOVE",
                 "从" + month.getYear() + "年" + month.getMonth() + "月排期表移除：" + req.getTitle()
                         + "（" + monthRows.size() + " 行）");
         notifyAllParticipants(req, "排期移除",
@@ -429,6 +429,19 @@ public class ScheduleServiceImpl implements ScheduleService {
                     BIZ_TYPE, req.getId());
         }
 
+        // 留痕：保存排期（格子或工期实际变化时记录，避免无变化保存刷日志）
+        boolean effortChanged = dto.getPlannedEffort() == null
+                ? row.getPlannedEffort() != null
+                : row.getPlannedEffort() == null || row.getPlannedEffort().compareTo(dto.getPlannedEffort()) != 0;
+        if (cellsChanged || effortChanged) {
+            writeLog(req, userId, "SCHEDULE_SAVE",
+                    "保存排期："
+                            + month.getYear() + "年" + month.getMonth() + "月·"
+                            + craftName(row.getCraft()) + "·" + userName(row.getUserId())
+                            + "，格子 " + newCells.size() + " 个，计划工期 "
+                            + (dto.getPlannedEffort() == null ? "未设" : dto.getPlannedEffort().stripTrailingZeros().toPlainString()));
+        }
+
         ScheduleRowSaveResultVO result = new ScheduleRowSaveResultVO();
         result.setUpdatedAt(toMillis(newVersion));
         result.setOverflow(overflow);
@@ -496,7 +509,7 @@ public class ScheduleServiceImpl implements ScheduleService {
         }
         // 操作留痕
         if (inserted > 0) {
-            writeLog(req.getId(), userId, "SCHEDULE_COPY",
+            writeLog(req, userId, "SCHEDULE_COPY",
                     "整个需求添加到" + nextMonth.getYear() + "年" + nextMonth.getMonth() + "月："
                             + req.getTitle() + "（" + inserted + " 行，格子空白、工期跨月共用）");
         }
@@ -848,12 +861,13 @@ public class ScheduleServiceImpl implements ScheduleService {
     }
 
     /**
-     * 写操作日志（biz_type=REQUIREMENT，需求恒 round_no=1）
+     * 写操作日志（biz_type=REQUIREMENT，需求恒 round_no=1；projectId 取自传入需求实体，避免每次回查）
      */
-    private void writeLog(Long requirementId, Long operatorId, String action, String remark) {
+    private void writeLog(Requirement req, Long operatorId, String action, String remark) {
         BizOperationLog log = new BizOperationLog();
         log.setBizType(BIZ_TYPE);
-        log.setBizId(requirementId);
+        log.setBizId(req.getId());
+        log.setProjectId(req.getProjectId());
         log.setOperatorId(operatorId);
         log.setAction(action);
         log.setRoundNo(1);

@@ -20,6 +20,9 @@ public class LoginVO {
     /** 0普通成员 1管理员 */
     private Integer isAdmin;
 
+    /** 1=是任一项目的项目经理（创建者）：前端据此显示"操作日志"等 PM 专属入口 */
+    private Integer isPm;
+
     /** 1需强制修改密码（前端据此引导跳转改密页） */
     private Integer forceChangePwd;
 }

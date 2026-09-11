@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 // vxe-table 局部引入：仅本页使用，不做全局注册
@@ -25,6 +25,7 @@ import type { CalendarDayData, CalendarDayType } from '@/api/calendar'
 import { craftLabel } from '@/constants/craft'
 import { priorityLabel, priorityTagType } from '@/constants/requirement'
 import ScheduleRequirementPicker from '@/components/ScheduleRequirementPicker.vue'
+import ScheduleFilterHeader from '@/components/ScheduleFilterHeader.vue'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -94,19 +95,189 @@ const flatRows = computed<FlatRow[]>(() => {
 
 // 需求级合并列下标：编号(0) / 需求名称(1) / 项目(2) / 策划(3) / 优先级(4)——工种(5)/负责人(6)为行级列不合并
 const GROUP_COL_INDEXES = [0, 1, 2, 3, 4]
-// 合并单元格配置：同一需求连续行的需求级列纵向合并
-const mergeCells = computed<VxeTablePropTypes.MergeCells>(() => {
-  const result: VxeTablePropTypes.MergeCells = []
-  let index = 0
-  for (const g of view.value?.groups || []) {
-    if (g.rows.length > 1) {
-      for (const col of GROUP_COL_INDEXES) {
-        result.push({ row: index, col, rowspan: g.rows.length, colspan: 1 })
+
+// ===== 列筛选（表头右下角三角按钮，勾选面板：去重合并统计 + 全选/反选/清除/确定） =====
+type FilterField = 'title' | 'projectName' | 'plannerName' | 'priority' | 'realName'
+const FILTER_FIELDS: FilterField[] = ['title', 'projectName', 'plannerName', 'priority', 'realName']
+
+// 各字段筛选状态：null=未筛选；否则为勾选的归一化值集合
+const colFilters = reactive<Record<FilterField, string[] | null>>({
+  title: null,
+  projectName: null,
+  plannerName: null,
+  priority: null,
+  realName: null
+})
+
+// 行字段取值归一化（优先级转字符串，行级负责人取自排期行，空值统一 ''）
+const filterKeyOf = (fr: FlatRow, field: FilterField): string => {
+  switch (field) {
+    case 'priority':
+      return String(fr.priority ?? '')
+    case 'realName':
+      return fr.row.realName ?? ''
+    default:
+      return (fr[field] ?? '') as string
+  }
+}
+
+// 按当前筛选状态过滤后的表格行（负责人为行级条件，其余为需求级条件）
+const filteredFlatRows = computed<FlatRow[]>(() => {
+  let rows = flatRows.value
+  for (const field of FILTER_FIELDS) {
+    const vals = colFilters[field]
+    if (!vals || vals.length === 0) continue
+    const set = new Set(vals)
+    rows = rows.filter((fr) => set.has(filterKeyOf(fr, field)))
+  }
+  return rows
+})
+
+// 筛选面板候选项：从当前月全部行（未筛选）去重合并统计
+const colFilterOptions = (field: FilterField): { value: string; label: string; count: number }[] => {
+  const counter = new Map<string, number>()
+  if (field === 'realName') {
+    // 行级列（负责人）不合并：按行计数
+    for (const fr of flatRows.value) {
+      const v = filterKeyOf(fr, field)
+      counter.set(v, (counter.get(v) || 0) + 1)
+    }
+  } else {
+    // 需求级列在表中多行合并为一格：按需求去重计数（同一需求的合并单元格只算一次）
+    const countedByReq = new Map<number, Set<string>>()
+    for (const fr of flatRows.value) {
+      const v = filterKeyOf(fr, field)
+      let seen = countedByReq.get(fr.requirementId)
+      if (!seen) {
+        seen = new Set()
+        countedByReq.set(fr.requirementId, seen)
+      }
+      if (!seen.has(v)) {
+        seen.add(v)
+        counter.set(v, (counter.get(v) || 0) + 1)
       }
     }
-    index += g.rows.length
+  }
+  const labelOf = (v: string) => {
+    if (v === '') return '（空）'
+    if (field === 'priority') return priorityLabel(Number(v) as 1 | 2 | 3)
+    return v
+  }
+  const opts = [...counter.entries()].map(([value, count]) => ({ value, label: labelOf(value), count }))
+  if (field === 'priority') {
+    opts.sort((a, b) => Number(a.value) - Number(b.value))
+  }
+  return opts
+}
+
+// 筛选面板单例状态：vxe 固定列复制渲染表头，:visible 共享会双开面板，
+// 故面板用 Teleport 单例 + 按触发按钮位置定位；checked 为打开时的初始勾选
+const filterPanel = reactive<{ open: boolean; field: FilterField | null; checked: string[] }>({
+  open: false,
+  field: null,
+  checked: []
+})
+
+// 面板定位（fixed，跟随触发按钮右下角）
+const PANEL_WIDTH = 210
+const panelPos = reactive({ top: 0, left: 0 })
+
+const panelVisible = (field: FilterField) => filterPanel.open && filterPanel.field === field
+
+const panelInitialChecked = (field: FilterField): string[] => {
+  const active = colFilters[field]
+  return active ? [...active] : colFilterOptions(field).map((o) => o.value)
+}
+
+const togglePanel = (field: FilterField, ev: MouseEvent) => {
+  if (panelVisible(field)) {
+    filterPanel.open = false
+    return
+  }
+  const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+  panelPos.top = rect.bottom + 4
+  panelPos.left = Math.max(8, Math.min(rect.right - PANEL_WIDTH + 12, window.innerWidth - PANEL_WIDTH - 8))
+  filterPanel.field = field
+  filterPanel.checked = panelInitialChecked(field)
+  filterPanel.open = true
+}
+
+// 全选勾选框三态：勾=全选，空=全不选，半态=部分选中
+const panelAllChecked = computed(() => {
+  if (!filterPanel.field) return false
+  const opts = colFilterOptions(filterPanel.field)
+  return opts.length > 0 && filterPanel.checked.length >= opts.length
+})
+
+const panelIndeterminate = computed(() => {
+  if (!filterPanel.field) return false
+  const opts = colFilterOptions(filterPanel.field)
+  return filterPanel.checked.length > 0 && filterPanel.checked.length < opts.length
+})
+
+const toggleAllPanel = () => {
+  if (!filterPanel.field) return
+  filterPanel.checked = panelAllChecked.value
+    ? []
+    : colFilterOptions(filterPanel.field).map((o) => o.value)
+}
+
+// 反选：勾选当前未勾选项
+const invertPanel = () => {
+  if (!filterPanel.field) return
+  const cur = new Set(filterPanel.checked)
+  filterPanel.checked = colFilterOptions(filterPanel.field)
+    .filter((o) => !cur.has(o.value))
+    .map((o) => o.value)
+}
+
+// 确定：全不选或全选视为清除筛选，其余按勾选集合过滤
+const confirmFilter = (field: FilterField, checked: string[]) => {
+  const total = colFilterOptions(field).length
+  colFilters[field] = checked.length === 0 || checked.length >= total ? null : [...checked]
+  filterPanel.open = false
+}
+
+const clearFilter = (field: FilterField) => {
+  colFilters[field] = null
+  filterPanel.open = false
+}
+
+// 点击面板与触发按钮之外的区域关闭面板（capture 阶段，先于触发按钮的 @click.stop）
+const handleDocClickForFilter = (e: MouseEvent) => {
+  if (!filterPanel.open) return
+  const t = e.target as HTMLElement | null
+  if (t && (t.closest('.col-filter-pop') || t.closest('.filter-trigger'))) return
+  filterPanel.open = false
+}
+
+// 合并单元格配置：筛选后同需求幸存行仍连续，按连续段计算需求级列纵向合并
+const mergeCells = computed<VxeTablePropTypes.MergeCells>(() => {
+  const result: VxeTablePropTypes.MergeCells = []
+  const rows = filteredFlatRows.value
+  let index = 0
+  let i = 0
+  while (i < rows.length) {
+    const rid = rows[i].requirementId
+    let j = i
+    while (j < rows.length && rows[j].requirementId === rid) j++
+    const span = j - i
+    if (span > 1) {
+      for (const col of GROUP_COL_INDEXES) {
+        result.push({ row: index, col, rowspan: span, colspan: 1 })
+      }
+    }
+    index += span
+    i = j
   }
   return result
+})
+
+// 数据（含筛选结果）变化后重应用合并：先清旧合并再按新行集设置，避免残留跨行错误指向
+watch(filteredFlatRows, async () => {
+  await nextTick()
+  tableRef.value?.clearMergeCells()
+  tableRef.value?.setMergeCells(mergeCells.value)
 })
 
 // ===== 日历辅助 =====
@@ -405,10 +576,10 @@ const handleRemove = async (row: FlatRow) => {
 }
 
 // ===== 数据加载 =====
-// 拉取项目列表（PM 权限判断；一次拉取一百条，超出部分一期不考虑）
+// 拉取项目列表（PM 权限判断；一次拉取五百条，覆盖绝大多数场景）
 const fetchProjects = async () => {
   try {
-    const res = await listProjects({ page: 1, size: 100 })
+    const res = await listProjects({ page: 1, size: 500 })
     projects.value = res.data.data.records
   } catch {
     // 失败已由拦截器统一提示，权限降级为只读
@@ -542,6 +713,9 @@ const handleBeforeUnload = (e: BeforeUnloadEvent) => {
 
 let guardDialogOpen = false
 onBeforeRouteLeave(async (to) => {
+  // 以 localStorage token 为准（请求拦截器的真实凭证来源）：登出或 401 过期时拦截器已清空，
+  // 此时再查排期注定 401，直接放行去登录页，否则「守卫调接口→401→跳登录→再触发守卫」死循环
+  if (!localStorage.getItem('token')) return true
   let incomplete: IncompleteRequirement[] = []
   try {
     const res = await listIncompleteRequirements()
@@ -549,7 +723,9 @@ onBeforeRouteLeave(async (to) => {
     // 顺带同步 beforeunload 兜底缓存
     hasIncomplete.value = incomplete.length > 0
   } catch {
-    // 检查接口异常（如后端未部署新版本）：明确提示而非静默拦截，宁可拦截不可放行
+    // 登录过期（拦截器已清 token 并跳登录）：静默放行，避免死循环
+    if (!localStorage.getItem('token')) return true
+    // 其余接口异常（如后端未部署新版本）：明确提示而非静默拦截，宁可拦截不可放行
     ElMessage.error('无法检查排期完成状态（接口异常），请确认后端已更新后重试')
     return false
   }
@@ -578,7 +754,7 @@ onBeforeRouteLeave(async (to) => {
             h(
               'li',
               {
-                style: 'cursor: pointer; color: #1b4f8a; text-decoration: underline',
+                style: 'cursor: pointer; color: #1976d2; text-decoration: underline',
                 onClick: () => {
                   ElMessageBox.close()
                   router.push(`/requirements/${r.requirementId}`)
@@ -619,6 +795,8 @@ const goCalendar = () => {
 // 页面挂载：并行加载项目与月表列表，随后加载视图；注册 F5/关标签页兜底拦截
 onMounted(async () => {
   window.addEventListener('beforeunload', handleBeforeUnload)
+  // 列筛选面板：点击外部关闭（capture 阶段，先于触发按钮的 @click.stop 生效）
+  window.addEventListener('click', handleDocClickForFilter, true)
   refreshIncompleteCache()
   fetchProjects()
   await fetchMonths()
@@ -628,6 +806,7 @@ onMounted(async () => {
 // 卸载：移除 beforeunload 监听（离开排期页后不再拦截刷新/关闭）
 onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
+  window.removeEventListener('click', handleDocClickForFilter, true)
 })
 </script>
 
@@ -680,7 +859,7 @@ onUnmounted(() => {
                合并丢失问题改由 ref.loadMergeCells() 在数据加载后主动应用（见 fetchView） -->
           <vxe-table
             ref="tableRef"
-            :data="flatRows"
+            :data="filteredFlatRows"
             :merge-cells="mergeCells"
             :row-config="{ keyField: '_key', isHover: false }"
             :row-class-name="rowClassName"
@@ -698,6 +877,13 @@ onUnmounted(() => {
             <!-- 需求级列：编号 / 需求名称+操作按钮（固定列）；项目/策划/优先级随滚动，为日期列让位 -->
             <vxe-column field="seq" title="编号" width="42" align="center" fixed="left" />
             <vxe-column field="title" title="需求名称" width="140" align="center" fixed="left">
+              <template #header>
+                <ScheduleFilterHeader
+                  title="需求名称"
+                  :active="!!colFilters.title"
+                  @toggle="(ev) => togglePanel('title', ev)"
+                />
+              </template>
               <template #default="{ row }">
                 <div class="req-cell">
                   <div class="req-info" @click="goDetail(row.requirementId)">
@@ -717,16 +903,37 @@ onUnmounted(() => {
               </template>
             </vxe-column>
             <vxe-column field="projectName" title="项目" min-width="72" align="center">
+              <template #header>
+                <ScheduleFilterHeader
+                  title="项目"
+                  :active="!!colFilters.projectName"
+                  @toggle="(ev) => togglePanel('projectName', ev)"
+                />
+              </template>
               <template #default="{ row }">
                 <span class="cell-text" :title="row.projectName">{{ row.projectName }}</span>
               </template>
             </vxe-column>
             <vxe-column field="plannerName" title="策划" min-width="64" align="center">
+              <template #header>
+                <ScheduleFilterHeader
+                  title="策划"
+                  :active="!!colFilters.plannerName"
+                  @toggle="(ev) => togglePanel('plannerName', ev)"
+                />
+              </template>
               <template #default="{ row }">
                 <span class="cell-text">{{ row.plannerName || '—' }}</span>
               </template>
             </vxe-column>
             <vxe-column field="priority" title="优先级" width="50" align="center">
+              <template #header>
+                <ScheduleFilterHeader
+                  title="优先级"
+                  :active="!!colFilters.priority"
+                  @toggle="(ev) => togglePanel('priority', ev)"
+                />
+              </template>
               <template #default="{ row }">
                 <el-tag size="small" :type="priorityTagType(row.priority)" effect="dark">
                   {{ priorityLabel(row.priority) }}
@@ -739,6 +946,13 @@ onUnmounted(() => {
               </template>
             </vxe-column>
             <vxe-column field="realName" title="负责人" width="80" align="center">
+              <template #header>
+                <ScheduleFilterHeader
+                  title="负责人"
+                  :active="!!colFilters.realName"
+                  @toggle="(ev) => togglePanel('realName', ev)"
+                />
+              </template>
               <template #default="{ row }">
                 <span class="owner-cell">
                   <span class="cell-text">{{ row.row.realName }}</span>
@@ -851,6 +1065,45 @@ onUnmounted(() => {
       :existing-ids="existingReqIds"
       @success="handleAdded"
     />
+
+    <!-- 列筛选单例面板：teleport 到 body，按触发按钮位置定位（固定列复制渲染下保证只有一个面板） -->
+    <Teleport to="body">
+      <div
+        v-if="filterPanel.open && filterPanel.field"
+        class="col-filter-pop"
+        :style="{ top: panelPos.top + 'px', left: panelPos.left + 'px' }"
+        @click.stop
+      >
+        <div class="cf-actions">
+          <el-checkbox
+            class="cf-select-all"
+            :model-value="panelAllChecked"
+            :indeterminate="panelIndeterminate"
+            @change="toggleAllPanel"
+          >全选</el-checkbox>
+          <el-button link size="small" @click="invertPanel">反选</el-button>
+          <el-button
+            link
+            size="small"
+            :disabled="!colFilters[filterPanel.field]"
+            @click="clearFilter(filterPanel.field)"
+          >清除</el-button>
+        </div>
+        <el-checkbox-group v-model="filterPanel.checked" class="cf-list">
+          <el-checkbox v-for="o in colFilterOptions(filterPanel.field)" :key="o.value" :value="o.value">
+            <span class="cf-label" :title="o.label">{{ o.label }}</span>
+            <span class="cf-count">({{ o.count }})</span>
+          </el-checkbox>
+        </el-checkbox-group>
+        <div class="cf-footer">
+          <el-button
+            type="primary"
+            size="small"
+            @click="confirmFilter(filterPanel.field, filterPanel.checked)"
+          >确定</el-button>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -1210,6 +1463,11 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
+/* 表头单元格作为筛选三角的定位锚点：三角 absolute 贴到单元格右下角而非标题文字右下角 */
+:deep(.matrix-table) .vxe-header--column .vxe-cell {
+  position: relative;
+}
+
 :deep(tr.row-archived) .vxe-cell,
 :deep(tr.row-archived) .vxe-cell .cell-value,
 :deep(tr.row-archived) .vxe-cell .req-info,
@@ -1223,5 +1481,108 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   justify-content: center;
+}
+</style>
+
+<style>
+.col-filter-pop {
+  position: fixed;
+  z-index: 3000;
+  width: 210px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  box-sizing: border-box;
+}
+
+.col-filter-pop .cf-actions {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+
+.col-filter-pop .cf-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow: auto;
+  border-top: 1px solid #ebeef5;
+  border-bottom: 1px solid #ebeef5;
+  padding: 2px 0;
+}
+
+.col-filter-pop .cf-list .el-checkbox {
+  height: 26px;
+  margin-right: 0;
+  padding: 0 4px;
+}
+
+.col-filter-pop .cf-list .el-checkbox:hover {
+  background: #f5f7fa;
+}
+
+.col-filter-pop .cf-label {
+  display: inline-block;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.col-filter-pop .cf-count {
+  margin-left: 6px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.col-filter-pop .cf-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+</style>
+<style>
+.col-filter-pop .cf-actions {
+  align-items: center;
+}
+
+.col-filter-pop .cf-select-all {
+  height: auto;
+  margin-right: 0;
+}
+
+.col-filter-pop .cf-select-all .el-checkbox__label {
+  font-size: 12px;
+  color: #606266;
+}
+</style>
+<style>
+.col-filter-pop .cf-list .el-checkbox__label,
+.col-filter-pop .cf-select-all .el-checkbox__label {
+  color: #303133;
+}
+
+.col-filter-pop .cf-list .el-checkbox:hover .el-checkbox__label,
+.col-filter-pop .cf-list .el-checkbox.is-checked .el-checkbox__label,
+.col-filter-pop .cf-list .el-checkbox.is-checked:hover .el-checkbox__label {
+  color: #303133;
+}
+
+.col-filter-pop .cf-select-all.is-checked .el-checkbox__label {
+  color: #1976d2;
+  font-weight: 600;
+}
+
+.col-filter-pop .el-checkbox__input.is-checked .el-checkbox__inner,
+.col-filter-pop .el-checkbox__input.is-indeterminate .el-checkbox__inner {
+  background-color: #1976d2;
+  border-color: #1976d2;
+}
+
+.col-filter-pop .el-checkbox__inner:hover {
+  border-color: #1976d2;
 }
 </style>

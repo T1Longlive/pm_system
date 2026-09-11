@@ -1,0 +1,83 @@
+# ======================================================================
+# pm-system 部署编排
+# ----------------------------------------------------------------------
+# 对外只暴露前端 8081（Cloudland 已占用 80）。
+# 后端 8080 / MySQL 3306 / Redis 6379 一律不做宿主机端口映射，
+# 仅在 compose 内部网络可达 —— 这是生产环境的基本原则。
+# ======================================================================
+
+services:
+  backend:
+    build:
+      # 构建上下文是仓库根目录，因为 Dockerfile 需要同时访问 backend/ 和 settings.xml
+      context: .
+      dockerfile: backend/Dockerfile
+    image: pm-system-backend
+    container_name: pm-backend
+    env_file:
+      - .env
+    environment:
+      # 容器内通过服务名访问 MySQL / Redis
+      DB_URL: ${DB_URL}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      PM_UPLOAD_DIR: /pm-upload
+      JWT_SECRET: ${JWT_SECRET}
+      TZ: Asia/Shanghai
+    volumes:
+      # 附件持久化：容器重建不丢文件
+      - pm-upload:/pm-upload
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    # 不映射端口：只允许 compose 网络内的 frontend 访问
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: pm-system-frontend
+    container_name: pm-frontend
+    ports:
+      # 对外唯一入口。改这里即可调整对外端口。
+      - "8081:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.0
+    container_name: pm-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: pm_system
+    # 不映射 3306 到宿主机
+    volumes:
+      - pm-mysql-data:/var/lib/mysql
+    healthcheck:
+      # 后端要等 MySQL 真正可连接再启动，否则会连不上库
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${DB_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: pm-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    # 不映射 6379 到宿主机
+    volumes:
+      - pm-redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  pm-upload:
+  pm-mysql-data:
+  pm-redis-data:

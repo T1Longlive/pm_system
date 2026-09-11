@@ -202,15 +202,17 @@ CREATE TABLE `attachment` (
 -- -------------------------------------------------------------
 CREATE TABLE `biz_operation_log` (
   `id`          BIGINT       PRIMARY KEY AUTO_INCREMENT,
-  `biz_type`    VARCHAR(20)  NOT NULL COMMENT 'REQUIREMENT/BUG',
+  `biz_type`    VARCHAR(20)  NOT NULL COMMENT 'REQUIREMENT/BUG/PROJECT',
   `biz_id`      BIGINT       NOT NULL,
+  `project_id`  BIGINT       NULL COMMENT '所属项目（日志按项目过滤权限用）',
   `operator_id` BIGINT       NOT NULL,
-  `action`      VARCHAR(30)  NOT NULL COMMENT 'CREATE/UPDATE/HANDLE_DONE/ACCEPT_PASS/ACCEPT_REJECT/ARCHIVE/RESTORE/CANCEL/ADD_PARTICIPANT/REMOVE_PARTICIPANT/SCHEDULE_SAVE/NODE_DONE',
+  `action`      VARCHAR(30)  NOT NULL COMMENT 'CREATE/UPDATE/DELETE/HANDLE_DONE/ACCEPT_PASS/ACCEPT_REJECT/ARCHIVE/RESTORE/CANCEL/ADD_PARTICIPANT/REMOVE_PARTICIPANT/SCHEDULE_SAVE/SCHEDULE_ADD/SCHEDULE_REMOVE/SCHEDULE_COPY/NODE_DONE/ADD_MEMBER/REMOVE_MEMBER',
   `round_no`    INT          NOT NULL DEFAULT 1 COMMENT 'Bug验收轮次（需求恒1）',
   `remark`      VARCHAR(500) NULL,
   `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY `idx_biz` (`biz_type`, `biz_id`),
-  KEY `idx_operator` (`operator_id`)
+  KEY `idx_operator` (`operator_id`),
+  KEY `idx_project` (`project_id`)
 ) COMMENT='操作日志；Bug轮次=该bug ACCEPT_REJECT 次数+1，由此推导';
 
 -- -------------------------------------------------------------

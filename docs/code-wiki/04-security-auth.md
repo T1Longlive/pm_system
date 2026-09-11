@@ -37,12 +37,14 @@ Controller（CurrentUser.getUserId(request) 取当前用户）
 
 | 层 | 判定 | 典型校验 |
 |----|------|------|
-| 全局管理员 | `user.is_admin=1`（`CurrentUser.getAdminUserId`） | 人员管理 CRUD、创建项目、创建月表、维护日历、Bug 归档/重新打开 |
-| 项目 PM | `project.creator_id == 当前用户` | 项目编辑/成员管理、需求创建（或 PLANNER 成员）/编辑/取消/归档、排期加需求/填格子、代点完成、Bug 归档/重新打开 |
-| 资源归属人 | `requirement.created_by` / `schedule_row.user_id` | 需求创建人可编辑；排期行负责人可点完成 |
-| 所有登录用户 | — | **Bug 模块**：编辑/新增/删除未归档 Bug、增删截图（Excel 化模型的有意放权） |
+| 全局管理员 | `user.is_admin=1`（`CurrentUser.getAdminUserId`） | 人员管理 CRUD、创建项目、创建月表、维护日历、Bug 归档/重新打开、操作日志全量可见 |
+| 项目 PM | `project.creator_id == 当前用户` | 项目编辑/成员管理、需求创建（或 PLANNER 成员）/编辑/取消/归档、需求日志查看、排期加/移需求/填格子、Bug 归档/重新打开、操作日志查看自己项目 |
+| 资源归属人 | `requirement.created_by` / `schedule_row.user_id` | 需求创建人可编辑；排期行负责人（本人口径） |
+| 所有登录用户 | — | **Bug 模块**：编辑/新增/删除未归档 Bug、增删截图（Excel 化模型的有意放权）；工作台/统计报表/全局搜索读取 |
 
-权限不足统一抛 `BizException(403, "无权限")`。前端配合：路由 `meta.admin` 守卫 + 列表/详情 VO 中的 `myRole: string[]`（含 `PM` 或工种码，空数组 = 只读）控制按钮显隐。
+权限不足统一抛 `BizException(403, "无权限")`。前端配合：路由 `meta.admin` 守卫 + 登录返回的 `isPm` 标志（「操作日志」菜单显隐）+ 列表/详情 VO 中的 `myRole: string[]`（含 `PM` 或工种码，空数组 = 只读）控制按钮显隐。
+
+> 操作日志模块的可见范围是**独立口径**：管理员 = 全部项目；非管理员 = 仅自己创建（`creator_id=自己`）的项目；非管理员且未创建任何项目时返回空页；指定越权 `projectId` 直接 403。
 
 ## 3. 统一响应结构 `common/Result<T>`
 
@@ -79,18 +81,19 @@ Controller（CurrentUser.getUserId(request) 取当前用户）
 
 ## 6. 并发控制与幂等
 
-| 机制 | 实现 | 场景 |
+| 并发控制 | 实现 | 场景 |
 |------|------|------|
 | 乐观锁 | 前端回传 `updatedAt`（毫秒时间戳）与服务端 `updated_at` 比对，不一致抛 `BizException(409, "数据已被他人修改，请刷新后重试")`；写入成功后显式推进 `updated_at`（`nextVersionTime`：截断到秒且严格大于旧值，避免同秒编辑版本不前进） | 需求编辑（`RequirementServiceImpl.updateRequirement`）、排期行保存（`ScheduleServiceImpl.saveRow`） |
-| 条件更新 | `UPDATE ... WHERE status = 旧状态`（`LambdaUpdateWrapper.eq(status, expect)`），影响行数为 0 视为并发被覆盖 | 需求状态推进（PENDING→READY、TEST 等），防止与取消竞态 |
-| SETNX 防竞态 | Redis key 缺失时 `setIfAbsent` 回填 DB 最大流水，再 INCR 取号 | 需求编号生成 |
-| 幂等设计 | 唯一键兜底（成员工种、月表年月、格子 row+day）；跨月顺延行插入前检查下月是否已有同需求+工种+负责人行 | 成员添加、月表创建、排期保存 |
+| 条件更新 | `UPDATE ... WHERE status = 旧状态`（`LambdaUpdateWrapper.eq(status, expect)`），影响行数为 0 视为并发被覆盖 | 需求状态对账（`RequirementStageServiceImpl.applyIfChanged`），防止与取消/归档竞态 |
+| SETNX 防竞态 | Redis key 缺失时 `setIfAbsent` 回填 DB 最大流水，再 INCR 取号 | 需求/Bug 编号生成 |
+| 幂等设计 | 唯一键兜底（成员工种、月表年月、格子 row+day）；跨月顺延/复制下月行插入前检查下月是否已有同需求+工种+负责人行 | 成员添加、月表创建、排期保存、复制下月 |
 
 ## 7. 密码安全
 
 - BCrypt 哈希存储（`AuthServiceImpl`/`UserServiceImpl` 直接实例化 `BCryptPasswordEncoder`）。
 - 默认/初始密码 `Pm@123456`；新建与重置密码后 `force_change_pwd=1`。
 - 登录失败对「用户不存在」与「密码错误」返回统一提示「用户名或密码错误」，防账号探测；停用账号单独提示。
+- 登录返回体额外带 `isPm`（是否任一项目创建者，便于前端显隐「操作日志」菜单），以及 `isAdmin`、`forceChangePwd`。
 
 **首次登录强制改密闭环（已实现）**：
 
@@ -109,3 +112,4 @@ Controller（CurrentUser.getUserId(request) 取当前用户）
 2. `/upload/**` 静态资源无鉴权，若附件敏感需增加鉴权或改为受控下载接口。
 3. CORS 当前为 `allowedOriginPatterns("*")` + `allowCredentials(true)`（开发友好；生产建议收敛来源）。
 4. token 有效期 5 天，无刷新/注销黑名单机制（无状态 JWT 的固有权衡）。
+5. 操作日志接口的信息边界：管理员可见全部项目日志，普通用户仅见自己创建项目的日志——**依赖 `creator_id` 判定，注意 PM 变更场景**（项目创建者不可转让，暂无此问题）。

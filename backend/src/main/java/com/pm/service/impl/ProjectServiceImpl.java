@@ -8,9 +8,11 @@ import com.pm.common.CraftConstants;
 import com.pm.dto.MemberAddDTO;
 import com.pm.dto.ProjectCreateDTO;
 import com.pm.dto.ProjectUpdateDTO;
+import com.pm.entity.BizOperationLog;
 import com.pm.entity.Project;
 import com.pm.entity.ProjectMember;
 import com.pm.entity.User;
+import com.pm.mapper.BizOperationLogMapper;
 import com.pm.mapper.ProjectMapper;
 import com.pm.mapper.ProjectMemberMapper;
 import com.pm.mapper.UserMapper;
@@ -42,6 +44,7 @@ public class ProjectServiceImpl implements ProjectService {
     private final ProjectMapper projectMapper;
     private final ProjectMemberMapper projectMemberMapper;
     private final UserMapper userMapper;
+    private final BizOperationLogMapper operationLogMapper;
     private final RequirementService requirementService;
 
     @Override
@@ -132,6 +135,8 @@ public class ProjectServiceImpl implements ProjectService {
         // 创建者自动担任项目经理（PM 不是工种，不写 project_member）
         project.setCreatorId(adminUserId);
         projectMapper.insert(project);
+        // 留痕：创建项目
+        writeLog(project, adminUserId, "CREATE", "创建项目：" + project.getName());
     }
 
     @Override
@@ -198,6 +203,8 @@ public class ProjectServiceImpl implements ProjectService {
         update.setName(dto.getName());
         update.setDescription(dto.getDescription());
         projectMapper.updateById(update);
+        // 留痕：编辑项目
+        writeLog(project, userId, "UPDATE", "编辑项目信息：" + project.getName());
     }
 
     @Override
@@ -222,6 +229,7 @@ public class ProjectServiceImpl implements ProjectService {
                                 .eq(ProjectMember::getProjectId, projectId)
                                 .eq(ProjectMember::getUserId, dto.getUserId()))
                 .stream().map(ProjectMember::getCraft).collect(Collectors.toSet());
+        List<String> addedCrafts = new ArrayList<>();
         for (String craft : new LinkedHashSet<>(dto.getCrafts())) {
             if (existingCrafts.contains(craft)) {
                 continue;
@@ -231,6 +239,14 @@ public class ProjectServiceImpl implements ProjectService {
             row.setUserId(dto.getUserId());
             row.setCraft(craft);
             projectMemberMapper.insert(row);
+            addedCrafts.add(craft);
+        }
+        // 留痕：添加成员（仅实际新增工种时记录）
+        if (!addedCrafts.isEmpty()) {
+            String craftNames = addedCrafts.stream().map(CraftConstants.CRAFT_NAMES::get)
+                    .collect(Collectors.joining("、"));
+            writeLog(project, userId, "ADD_MEMBER",
+                    "添加成员：" + member.getRealName() + "（" + craftNames + "）");
         }
     }
 
@@ -261,6 +277,26 @@ public class ProjectServiceImpl implements ProjectService {
         // 需求联动（5.4.5）：被移除成员退出该项目全部非终态需求的参与人
         // （craft 为空=全部工种），排期行标 VOID、通知本人并对账需求状态；同一事务内失败即回滚
         requirementService.removeParticipantByProjectMember(projectId, targetUserId, craft, userId);
+        // 留痕：移除成员（删除成功后记录；目标用户名查库回显）
+        User removed = userMapper.selectById(targetUserId);
+        String craftText = craft == null ? "全部工种" : CraftConstants.CRAFT_NAMES.getOrDefault(craft, craft);
+        writeLog(project, userId, "REMOVE_MEMBER",
+                "移除成员：" + (removed == null ? targetUserId : removed.getRealName()) + "（" + craftText + "）");
+    }
+
+    /**
+     * 写操作日志（biz_type=PROJECT，round_no 恒 1；project_id 即当前项目）
+     */
+    private void writeLog(Project project, Long operatorId, String action, String remark) {
+        BizOperationLog log = new BizOperationLog();
+        log.setBizType("PROJECT");
+        log.setBizId(project.getId());
+        log.setProjectId(project.getId());
+        log.setOperatorId(operatorId);
+        log.setAction(action);
+        log.setRoundNo(1);
+        log.setRemark(remark);
+        operationLogMapper.insert(log);
     }
 
     /**

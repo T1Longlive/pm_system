@@ -38,12 +38,21 @@ const allMenus = [
 // 是否管理员
 const isAdmin = computed(() => userStore.userInfo?.isAdmin === 1)
 
-// 实际渲染的菜单：管理员额外展示「日历管理」
-const menus = computed(() =>
-  isAdmin.value
-    ? [...allMenus, { path: '/admin/calendar', title: '日历管理', icon: 'Calendar' }]
-    : allMenus
-)
+// 是否任一项目的项目经理：后端登录/me 接口直接返回标志（查 creator_id），
+// 不再依赖前端拉项目列表猜测（项目超分页上限时会漏判）
+const isPm = computed(() => userStore.userInfo?.isPm === 1)
+
+// 实际渲染的菜单：管理员/项目经理额外展示「操作日志」，管理员再展示「日历管理」
+const menus = computed(() => {
+  const base = [...allMenus]
+  if (isAdmin.value || isPm.value) {
+    base.push({ path: '/operation-logs', title: '操作日志', icon: 'Document' })
+  }
+  if (isAdmin.value) {
+    base.push({ path: '/admin/calendar', title: '日历管理', icon: 'Calendar' })
+  }
+  return base
+})
 
 // 当前激活的菜单项（跟随路由变化）
 const activeMenu = computed(() => route.path)

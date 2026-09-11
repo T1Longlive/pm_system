@@ -278,8 +278,16 @@ public class RequirementServiceImpl implements RequirementService {
     }
 
     @Override
-    public List<OperationLogVO> listLogs(Long requirementId) {
-        requireRequirement(requirementId);
+    public List<OperationLogVO> listLogs(Long requirementId, Long userId) {
+        Requirement req = requireRequirement(requirementId);
+        // 权限：仅管理员或该项目 PM（创建者）可查看操作日志
+        boolean admin = isAdmin(userId);
+        if (!admin) {
+            Project project = requireProject(req.getProjectId());
+            if (!project.getCreatorId().equals(userId)) {
+                throw new BizException(403, "仅项目经理或管理员可查看操作日志");
+            }
+        }
         List<BizOperationLog> logs = operationLogMapper.selectList(
                 new LambdaQueryWrapper<BizOperationLog>()
                         .eq(BizOperationLog::getBizType, BIZ_TYPE)
@@ -345,7 +353,7 @@ public class RequirementServiceImpl implements RequirementService {
         insertAttachments(req.getId(), userId, dto.getAttachments());
 
         // 操作留痕
-        writeLog(req.getId(), userId, "CREATE", "创建需求");
+        writeLog(req, userId, "CREATE", "创建需求");
         return req.getId();
     }
 
@@ -455,7 +463,7 @@ public class RequirementServiceImpl implements RequirementService {
                         .eq(Attachment::getBizId, requirementId));
                 insertAttachments(requirementId, userId, dto.getAttachments());
             }
-            writeLog(requirementId, userId, "UPDATE", buildUpdateSummary(req, dto, titleChanged,
+            writeLog(req, userId, "UPDATE", buildUpdateSummary(req, dto, titleChanged,
                     priorityChanged, plannerChanged, descriptionChanged,
                     addedParticipants, removedParticipants, attachmentChanged, attachmentAdded, attachmentRemoved));
         }
@@ -487,7 +495,7 @@ public class RequirementServiceImpl implements RequirementService {
         requirementMapper.updateById(update);
 
         // 操作留痕
-        writeLog(requirementId, userId, "CANCEL", "取消原因：" + dto.getReason());
+        writeLog(req, userId, "CANCEL", "取消原因：" + dto.getReason());
 
         // 通知全部参与人 + 策划（按用户去重）
         Set<Long> receiverIds = new LinkedHashSet<>();
@@ -523,7 +531,7 @@ public class RequirementServiceImpl implements RequirementService {
         requirementMapper.updateById(update);
 
         // 操作留痕
-        writeLog(requirementId, userId, "ARCHIVE", "需求归档");
+        writeLog(req, userId, "ARCHIVE", "需求归档");
 
         // 通知全部参与人
         List<RequirementParticipant> participants = participantMapper.selectList(
@@ -794,17 +802,26 @@ public class RequirementServiceImpl implements RequirementService {
     }
 
     /**
-     * 写操作日志（需求恒 round_no=1）
+     * 写操作日志（需求恒 round_no=1；projectId 取自传入需求实体，避免每次回查）
      */
-    private void writeLog(Long requirementId, Long operatorId, String action, String remark) {
+    private void writeLog(Requirement req, Long operatorId, String action, String remark) {
         BizOperationLog log = new BizOperationLog();
         log.setBizType(BIZ_TYPE);
-        log.setBizId(requirementId);
+        log.setBizId(req.getId());
+        log.setProjectId(req.getProjectId());
         log.setOperatorId(operatorId);
         log.setAction(action);
         log.setRoundNo(1);
         log.setRemark(remark);
         operationLogMapper.insert(log);
+    }
+
+    /**
+     * 当前用户是否全局管理员（user.is_admin=1）
+     */
+    private boolean isAdmin(Long userId) {
+        User user = userMapper.selectById(userId);
+        return user != null && user.getIsAdmin() != null && user.getIsAdmin() == 1;
     }
 
     // ==================== 变更摘要 ====================
