@@ -2,7 +2,7 @@ version: "1.0"
 name: pm-system-deploy
 displayName: pm-system-deploy
 stages:
-- name: Build On Cloud
+- name: 云端构建（Maven + Node）
   displayName: 云端构建（Maven + Node）
   strategy: naturally
   trigger: auto
@@ -14,12 +14,13 @@ stages:
     mavenVersion: "3.9"
     commands:
     - mvn -B clean package -s ./settings.xml
-    caches:
-    - "~/.m2"
     artifacts:
     - name: build_result
       path:
       - ./backend/target
+      type: .tar.gz
+    caches:
+    - "~/.m2"
   - step: build@nodejs
     name: frontend_build
     displayName: 前端 Node 构建
@@ -27,18 +28,17 @@ stages:
     commands:
     - cd frontend && npm ci --registry=https://registry.npmmirror.com
     - cd frontend && npm run build
-    caches:
-    - "~/.npm"
     artifacts:
     - name: dist_result
       path:
       - ./frontend/dist
-- name: Deploy To Aliyun
+      type: .tar.gz
+    caches:
+    - "~/.npm"
+- name: 部署到阿里云主机
   displayName: 部署到阿里云主机
   strategy: naturally
   trigger: auto
-  dependsOn:
-  - Build On Cloud
   executor:
   - t1longlive
   steps:
@@ -68,7 +68,8 @@ stages:
     gitClone: "false"
     hostGroupID:
       ID: ali_cloudland
-      hostID: []
+      hostID:
+      - 844d9abd-3fd6-4e32-99ee-3339f2497a55
     notify: []
     strategy:
       retry: "0"
