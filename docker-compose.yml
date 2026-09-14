@@ -8,11 +8,11 @@
 
 services:
   backend:
-    build:
-      # 构建上下文是仓库根目录，因为 Dockerfile 需要同时访问 backend/ 和 settings.xml
-      context: .
-      dockerfile: backend/Dockerfile
-    image: pm-system-backend
+    # 镜像由 Gitee 云端构建并推送到阿里云 ACR
+    # （见 .workflow/流水线-*.yml 里的 build@docker 步骤）
+    # 服务器只 pull + up，不再本地编译 —— 这是方案 B 的核心。
+    # ⚠️ 地址中的 t1longlive 是 Gitee 个人空间地址，Gitee Go 会用它作 ACR 命名空间
+    image: registry.cn-hangzhou.aliyuncs.com/t1longlive/pm-backend:latest
     container_name: pm-backend
     env_file:
       - .env
@@ -38,10 +38,8 @@ services:
     # 不映射端口：只允许 compose 网络内的 frontend 访问
 
   frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-    image: pm-system-frontend
+    # 同上：镜像来自云端构建产物
+    image: registry.cn-hangzhou.aliyuncs.com/t1longlive/pm-frontend:latest
     container_name: pm-frontend
     ports:
       # 对外唯一入口。改这里即可调整对外端口。
