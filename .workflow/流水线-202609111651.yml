@@ -28,7 +28,7 @@ stages:
         displayName: 构建后端镜像
         repository: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com
         username: T1LONGLIVE
-        password: REPLACE_ACR_PASSWORD
+        password: Ckwlq131718/
         tag: pm-backend:latest
         dockerfile: ./backend/Dockerfile
         isCache: false
@@ -37,7 +37,7 @@ stages:
         displayName: 构建前端镜像
         repository: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com
         username: T1LONGLIVE
-        password: REPLACE_ACR_PASSWORD
+        password: Ckwlq131718/
         tag: pm-frontend:latest
         dockerfile: ./frontend/Dockerfile
         isCache: false
