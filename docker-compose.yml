@@ -59,6 +59,11 @@ services:
     # 不映射 3306 到宿主机
     volumes:
       - pm-mysql-data:/var/lib/mysql
+      # 建表脚本：MySQL 官方镜像会在「数据目录为空时」自动执行
+      # /docker-entrypoint-initdb.d/ 下的 .sql。不挂这里，库建出来就是空的，
+      # 后端启动时（ApplicationRunner / ApplicationReadyEvent 会查库）会直接崩。
+      # 注意：仅在首次初始化时执行一次；卷里已有数据则不会重跑。
+      - ./backend/src/main/resources/db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       # 后端要等 MySQL 真正可连接再启动，否则会连不上库
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${DB_PASSWORD}"]
