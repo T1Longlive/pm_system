@@ -26,9 +26,9 @@ stages:
     name: build_frontend_image
     displayName: 构建前端镜像
     certificate: "18140213287"
-    repository: "{{CERTIFICATION.${CERTIFICATE}.server}}"
-    username: "{{CERTIFICATION.${CERTIFICATE}.username}}"
-    password: "{{CERTIFICATION.${CERTIFICATE}.password}}"
+    repository: "{{CERTIFICATION.18140213287.server}}"
+    username: "{{CERTIFICATION.18140213287.username}}"
+    password: "{{CERTIFICATION.18140213287.password}}"
     tag: pm-frontend:latest
     dockerfile: ./frontend/Dockerfile
     isCache: false
@@ -38,6 +38,11 @@ stages:
       retry: "0"
 - name: 部署到阿里云主机
   displayName: 部署到阿里云主机
+  # 质量门禁：必须等构建阶段成功才执行部署。
+  # ⚠️ Gitee 可视化编辑器保存流水线时**会丢掉 dependsOn**（已发生两次），
+  #    每次在网页端保存后，都要回来确认这一行还在。
+  dependsOn:
+  - 云端构建镜像
   strategy: naturally
   trigger: auto
   executor:
