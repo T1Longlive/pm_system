@@ -26,8 +26,8 @@ stages:
       - step: build@docker
         name: build_backend_image
         displayName: 构建后端镜像
-        repository: registry.cn-hangzhou.aliyuncs.com
-        username: REPLACE_ACR_USERNAME
+        repository: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com
+        username: T1LONGLIVE
         password: REPLACE_ACR_PASSWORD
         tag: pm-backend:latest
         dockerfile: ./backend/Dockerfile
@@ -35,8 +35,8 @@ stages:
       - step: build@docker
         name: build_frontend_image
         displayName: 构建前端镜像
-        repository: registry.cn-hangzhou.aliyuncs.com
-        username: REPLACE_ACR_USERNAME
+        repository: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com
+        username: T1LONGLIVE
         password: REPLACE_ACR_PASSWORD
         tag: pm-frontend:latest
         dockerfile: ./frontend/Dockerfile

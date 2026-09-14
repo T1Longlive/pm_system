@@ -58,7 +58,7 @@ git reset --hard "origin/$BRANCH"
 # 方案 B：镜像由 Gitee 云端构建（build@docker）并推送到阿里云 ACR，
 # 服务器只负责拉取运行，不再本地编译 —— 因此不再需要 Maven / Node，
 # 也就没有了本地编译的内存峰值。
-ACR_HOST="registry.cn-hangzhou.aliyuncs.com"
+ACR_HOST="crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com"
 
 # 私有仓库需要先登录。若没登录，pull 会失败并报 Authentication 相关错误，
 # 这里提前检测并给出可执行的提示，避免对着难懂的报错排查。
