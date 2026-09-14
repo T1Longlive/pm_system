@@ -1,90 +1,79 @@
-version: '1.0'
+version: "1.0"
 name: pm-system-deploy
 displayName: pm-system-deploy
+stages:
+- name: 云端构建镜像
+  displayName: 云端构建镜像
+  strategy: naturally
+  trigger: auto
+  executor: []
+  steps:
+  - step: build@docker
+    name: build_backend_image
+    displayName: 构建后端镜像
+    certificate: "18140213287"
+    repository: "{{CERTIFICATION.18140213287.server}}"
+    username: "{{CERTIFICATION.18140213287.username}}"
+    password: "{{CERTIFICATION.18140213287.password}}"
+    tag: pm-backend:latest
+    dockerfile: ./backend/Dockerfile
+    isCache: false
+    strategy:
+      retry: "0"
+  - step: build@docker
+    name: build_frontend_image
+    displayName: 构建前端镜像
+    repository: "{{CERTIFICATION.${CERTIFICATE}.server}}"
+    username: "{{CERTIFICATION.${CERTIFICATE}.username}}"
+    password: "{{CERTIFICATION.${CERTIFICATE}.password}}"
+    tag: pm-frontend:latest
+    dockerfile: ./frontend/Dockerfile
+    isCache: false
+- name: 部署到阿里云主机
+  displayName: 部署到阿里云主机
+  strategy: naturally
+  trigger: auto
+  executor:
+  - t1longlive
+  steps:
+  - step: shell@agent
+    name: deploy_aliyun
+    displayName: 执行部署脚本
+    schedulerType: DISTRIBUTED
+    scriptType: SH
+    script: |-
+      set -Eeuo pipefail
+
+      APP_DIR="/root/pm-system"
+      BRANCH="main"
+      REPO_URL="https://gitee.com/t1longlive/pm-system.git"
+
+      if [ ! -d "$APP_DIR/.git" ]; then
+        echo ">> 首次部署：克隆仓库到 $APP_DIR"
+        mkdir -p "$(dirname "$APP_DIR")"
+        git clone -b "$BRANCH" "$REPO_URL" "$APP_DIR"
+      fi
+
+      cd "$APP_DIR"
+      git fetch origin "$BRANCH"
+      git checkout "$BRANCH"
+      git reset --hard "origin/$BRANCH"
+
+      /bin/bash scripts/deploy.sh "$BRANCH"
+    gitClone: "false"
+    hostGroupID:
+      ID: ali_cloudland
+      hostID:
+      - 844d9abd-3fd6-4e32-99ee-3339f2497a55
+    notify: []
+    strategy:
+      retry: "0"
 triggers:
   trigger: auto
   push:
     branches:
+      prefix: []
       precise:
-        - main
-stages:
-  - name: build
-    displayName: 云端构建镜像
-    strategy: naturally
-    trigger: auto
-    executor: []
-    steps:
-      # ==============================================================
-      # 方案 B：Gitee 云端构建镜像 → 推送阿里云 ACR → 服务器只 pull。
-      # 插件底层是 buildctl（无守护进程），不需要 Docker-in-Docker。
-      #
-      # 🔴 凭证相关字段必须用「图形视图」配置（下方 step 曾被实测证伪）：
-      #    实测日志中插件打印的是**未解析的模板**
-      #        DOCKER_REPOSITORY={{CERTIFICATION.${CERTIFICATE}.server}}
-      #    说明 repository / username / password 三个字段被**静默忽略** ——
-      #    v2.0.0 插件是通过「凭证 (CERTIFICATE)」定位镜像仓库的，
-      #    不再读 inline 的地址/账号/密码（社区版文档已过时）。
-      #    正确做法：先在 Gitee「凭证管理」新建一个 Docker Registry 凭证
-      #    （填仓库地址 + 用户名 + 密码），再在图形视图里选中它。
-      #    ✅ 附带好处：密码存在凭证库里，**不会进入仓库**。
-      #
-      # 🔴 命名空间由 Gitee 自动填充为「Gitee 个人空间地址」，无法指定，
-      #    因此 ACR 的命名空间必须建为 t1longlive。
-      #    完整镜像地址 = <凭证里的仓库地址>/t1longlive/<tag 冒号前的仓库名>:<标签>
-      # ==============================================================
-      - step: build@docker
-        name: build_backend_image
-        displayName: 构建后端镜像
-        # ⚠️ 凭证字段请在图形视图中配置（见上方说明），勿手写 repository/username/password
-        tag: pm-backend:latest
-        dockerfile: ./backend/Dockerfile
-        isCache: false
-      - step: build@docker
-        name: build_frontend_image
-        displayName: 构建前端镜像
-        # ⚠️ 凭证字段请在图形视图中配置（见上方说明）
-        tag: pm-frontend:latest
-        dockerfile: ./frontend/Dockerfile
-        isCache: false
-  - name: deploy
-    displayName: 部署到阿里云主机
-    strategy: naturally
-    trigger: auto
-    dependsOn:
-      - build
-    executor:
-      - t1longlive
-    steps:
-      - step: shell@agent
-        name: deploy_aliyun
-        displayName: 执行部署脚本
-        schedulerType: DISTRIBUTED
-        scriptType: SH
-        script: |-
-          set -Eeuo pipefail
-
-          APP_DIR="/root/pm-system"
-          BRANCH="main"
-          REPO_URL="https://gitee.com/t1longlive/pm-system.git"
-
-          if [ ! -d "$APP_DIR/.git" ]; then
-            echo ">> 首次部署：克隆仓库到 $APP_DIR"
-            mkdir -p "$(dirname "$APP_DIR")"
-            git clone -b "$BRANCH" "$REPO_URL" "$APP_DIR"
-          fi
-
-          cd "$APP_DIR"
-          git fetch origin "$BRANCH"
-          git checkout "$BRANCH"
-          git reset --hard "origin/$BRANCH"
-
-          /bin/bash scripts/deploy.sh "$BRANCH"
-        gitClone: 'false'
-        hostGroupID:
-          ID: ali_cloudland
-          hostID:
-            - 844d9abd-3fd6-4e32-99ee-3339f2497a55
-        notify: []
-        strategy:
-          retry: '0'
+      - main
+      include: []
 notify: []
