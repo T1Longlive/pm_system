@@ -100,7 +100,8 @@ stages:
         gitClone: 'false'
         hostGroupID:
           ID: ali_cloudland
-          hostID: []
+          hostID:
+            - 844d9abd-3fd6-4e32-99ee-3339f2497a55
         notify: []
         strategy:
           retry: '0'
