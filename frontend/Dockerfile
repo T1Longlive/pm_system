@@ -3,10 +3,14 @@
 # ----------------------------------------------------------------------
 # 阶段 1 builder：Node 构建出 dist/
 # 阶段 2 runtime：nginx 托管静态文件 + 反向代理 /api 到后端
+#
+# 🔴 基础镜像为什么不用 docker.io：Gitee 云端构建无法访问 Docker Hub
+#    （i/o timeout），故基础镜像已镜像到本项目 ACR，见
+#    scripts/mirror-base-images.sh
 # ======================================================================
 
 # ---------- 阶段 1：构建 ----------
-FROM node:20-alpine AS builder
+FROM crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/node:20-alpine AS builder
 
 WORKDIR /build
 
@@ -23,7 +27,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---------- 阶段 2：运行 ----------
-FROM nginx:alpine AS runtime
+FROM crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/nginx:alpine AS runtime
 
 ENV TZ=Asia/Shanghai
 

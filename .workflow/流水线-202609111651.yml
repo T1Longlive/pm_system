@@ -15,29 +15,34 @@ stages:
     executor: []
     steps:
       # ==============================================================
-      # 方案 B：在 Gitee 云端构建 Docker 镜像并推送到阿里云 ACR，
-      # 服务器只做 docker compose pull + up -d，不再本地编译。
-      # 插件底层是 buildctl（无守护进程），因此不需要 Docker-in-Docker。
+      # 方案 B：Gitee 云端构建镜像 → 推送阿里云 ACR → 服务器只 pull。
+      # 插件底层是 buildctl（无守护进程），不需要 Docker-in-Docker。
       #
-      # 🔴 命名空间由 Gitee 自动填充，取的是「Gitee 个人空间地址」，
-      #    无法在 tag 里指定。所以 ACR 的命名空间必须建为 t1longlive。
-      #    完整镜像地址 = <repository>/t1longlive/<tag 冒号前的仓库名>:<标签>
+      # 🔴 凭证相关字段必须用「图形视图」配置（下方 step 曾被实测证伪）：
+      #    实测日志中插件打印的是**未解析的模板**
+      #        DOCKER_REPOSITORY={{CERTIFICATION.${CERTIFICATE}.server}}
+      #    说明 repository / username / password 三个字段被**静默忽略** ——
+      #    v2.0.0 插件是通过「凭证 (CERTIFICATE)」定位镜像仓库的，
+      #    不再读 inline 的地址/账号/密码（社区版文档已过时）。
+      #    正确做法：先在 Gitee「凭证管理」新建一个 Docker Registry 凭证
+      #    （填仓库地址 + 用户名 + 密码），再在图形视图里选中它。
+      #    ✅ 附带好处：密码存在凭证库里，**不会进入仓库**。
+      #
+      # 🔴 命名空间由 Gitee 自动填充为「Gitee 个人空间地址」，无法指定，
+      #    因此 ACR 的命名空间必须建为 t1longlive。
+      #    完整镜像地址 = <凭证里的仓库地址>/t1longlive/<tag 冒号前的仓库名>:<标签>
       # ==============================================================
       - step: build@docker
         name: build_backend_image
         displayName: 构建后端镜像
-        repository: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com
-        username: T1LONGLIVE
-        password: REPLACE_ACR_PASSWORD
+        # ⚠️ 凭证字段请在图形视图中配置（见上方说明），勿手写 repository/username/password
         tag: pm-backend:latest
         dockerfile: ./backend/Dockerfile
         isCache: false
       - step: build@docker
         name: build_frontend_image
         displayName: 构建前端镜像
-        repository: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com
-        username: T1LONGLIVE
-        password: REPLACE_ACR_PASSWORD
+        # ⚠️ 凭证字段请在图形视图中配置（见上方说明）
         tag: pm-frontend:latest
         dockerfile: ./frontend/Dockerfile
         isCache: false
