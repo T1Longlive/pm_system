@@ -18,17 +18,24 @@ stages:
     tag: pm-backend:latest
     dockerfile: ./backend/Dockerfile
     isCache: false
+    processorType:
+    - amd64
     strategy:
       retry: "0"
   - step: build@docker
     name: build_frontend_image
     displayName: 构建前端镜像
+    certificate: "18140213287"
     repository: "{{CERTIFICATION.${CERTIFICATE}.server}}"
     username: "{{CERTIFICATION.${CERTIFICATE}.username}}"
     password: "{{CERTIFICATION.${CERTIFICATE}.password}}"
     tag: pm-frontend:latest
     dockerfile: ./frontend/Dockerfile
     isCache: false
+    processorType:
+    - amd64
+    strategy:
+      retry: "0"
 - name: 部署到阿里云主机
   displayName: 部署到阿里云主机
   strategy: naturally
