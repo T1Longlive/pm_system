@@ -56,7 +56,15 @@ pm:
   # 附件存储根目录：按 {yyyy}/{MM}/{uuid}.{ext} 子目录组织，经 /upload/** 静态映射对外访问
   upload-dir: ${PM_UPLOAD_DIR:D:/pm-upload}
 
-# 跨域白名单（逗号分隔），由 WebConfig 读取
+# 跨域白名单（逗号分隔），由 WebConfig 通过 @Value("${CORS_ALLOWED_ORIGINS:...}")
+# 直接读取「环境变量」，默认值已写在 @Value 表达式里。
+#
+# ⚠️ 此处不要再定义同名键。写成下面这样会形成「自己引用自己」：
+#        CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:http://...}
+#    Spring 启动时会抛：
+#        IllegalArgumentException: Circular placeholder reference
+#    本文件其余变量之所以安全，是因为「配置路径」与「环境变量名」不同名
+#    （如 spring.datasource.url 引用 ${DB_URL}），不存在自我引用。
+#
 # 生产环境经 nginx 同源反向代理，浏览器眼中前后端同源，无需跨域；
-# 默认值仅覆盖本地开发端口，不要在生产放开为 *
-CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:8081}
+# 不要把默认值在生产放开为 *
