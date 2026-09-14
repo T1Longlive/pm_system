@@ -96,13 +96,13 @@ const handleLogin = async () => {
 </template>
 
 <style scoped>
-/* 登录页：全屏居中 */
+/* 登录页：全屏居中，白色背景 */
 .login-page {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100%;
-  background: linear-gradient(135deg, #1f3b73 0%, #2f5cad 100%);
+  background: #fff;
 }
 
 /* 登录卡片宽度 */
