@@ -38,6 +38,12 @@ stages:
       retry: "0"
 - name: 部署到阿里云主机
   displayName: 部署到阿里云主机
+  # 质量门禁：必须等构建阶段成功才部署。
+  # ⚠️ Gitee 可视化编辑器保存时会删掉 dependsOn（已发生 3 次）。
+  #    根因：编辑器不识别 YAML 里手写的该字段。
+  #    根治办法：在「图形视图」的阶段设置里用界面配置依赖，编辑器才会保留。
+  dependsOn:
+  - 云端构建镜像
   strategy: naturally
   trigger: auto
   executor:
