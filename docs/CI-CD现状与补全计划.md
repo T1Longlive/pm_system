@@ -89,6 +89,24 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 - ⚠️ **`:latest` 已废弃、不会再被推送。** 它现在指向的是改造前那个旧镜像，
   谁再去 `docker pull ...:latest` 都会拿到过时的东西。建议在 ACR 控制台把它删掉，
   免得将来有人误用。
+
+  **为什么它不会被"下次提交覆盖"**：`docker push` 只推你明确指定的 ref，
+  而流水线的 tag 字段已经是 `${GITEE_COMMIT}` —— 没有任何环节再写 `latest`。
+  它是一条**冻结的指针**，不会自动更新。
+
+  **验证方法（别只信推断，一眼就能证实）**：ACR 控制台 → `t1longlive/pm-backend`
+  → 版本列表，看 `latest` 的**更新时间**：
+
+  | 看到的 | 说明 |
+  |---|---|
+  | 停在改造那天之前（2026-09-15 11:45 前） | ✅ 已冻结，符合预期 |
+  | 时间是最近某次推送 | ❌ 还有东西在写它 → 去查构建日志里 buildctl 的 `-t` 参数 |
+
+  这个检查顺带让你看到 ACR 上累积了多少 SHA tag（见下一条）。
+
+  **要删的话，控制台最快**：4 个仓库各选 `latest` → 删除，约 3 分钟。
+  理论上也能用 Registry v2 API（`DELETE /v2/<name>/manifests/<digest>`）脚本化，
+  但要先取 digest、处理鉴权，为 4 个 tag 不值得。
 - ⚠️ ACR 上的 tag 会随每次 push 累积。个人版实例有配额，定期在控制台清理旧 tag。
 
 ### 2.5 Gitee 主机组
