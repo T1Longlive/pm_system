@@ -299,12 +299,14 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 
 | 项 | 位置 | 性质 |
 |---|---|---|
-| Cloudland 的 CI 门禁完全关闭（无测试 + `-DskipTests`） | Cloudland | 阶段二还没做到它 |
 | Cloudland 回滚能力尚未恢复 | Cloudland | 它还差一次推送才产生第 1 个 SHA 版本，再推一次才有可回退目标 |
 | Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段） | 流水线 | 待验证 |
 | Cloudland 首页标语不统一 | `HomeView.vue` / `LoginForm.vue` | 低优先 |
+| Cloudland `jwt.expire` 与 `jwt.week` 默认值相同 → `remember` 不生效 | Cloudland | 待确认业务意图，未改 |
+| Cloudland `JwtUtils` 字段注入，可测性差 | Cloudland | 建议改构造器注入，未改 |
 
 **已清掉的**（留档，说明这些坑踩过）：
+- ~~Cloudland 的 CI 门禁完全关闭（无测试依赖 + 无测试 + `-DskipTests`）~~ → **阶段二已补**，17 个纯单元测试 + 刻意改坏验证通过
 - ~~回滚能力为零~~ → **已恢复**：ACR 现有 2 个 SHA 版本（`5c4c5c7` / `0c94da1`），可回退
 - ~~初始管理员密码未改~~ → 已改
 - ~~`deploy.sh` 健康检查只盯前端~~ → 阶段三已补，且生产实测通过
@@ -644,6 +646,73 @@ g.getTotal().compareTo(g.getPlannedEffort()) < 0    // 排满判据
   测试的价值上限 = 测试的质量上限。
 - 只覆盖**纯逻辑**。跨模块、跨服务、真实数据库行为、前端行为都不在其中。
 - 云端构建时间会变长（多跑一遍测试，约十几秒），可接受。
+
+#### Cloudland 同步（2026-09-15）—— ✅ 已实现并本地验证
+
+Cloudland 那边的情况比 pm-system 更差，**三项全缺**：
+
+| 项 | 改造前 |
+|---|---|
+| 测试依赖 | `pom.xml` 里**连 `spring-boot-starter-test` 都没有** |
+| 测试代码 | `src/test/` 目录不存在 |
+| 打包命令 | `mvn clean package -DskipTests -q`（`-q` 还会把 `Tests run:` 一起压掉） |
+
+改了三处：
+
+1. **`pom.xml` 加 `spring-boot-starter-test`**（test scope，版本由父 pom 管理）
+2. **写 3 个纯单元测试**（共 17 用例，均无 Spring、无数据库）：
+
+   | 测试类 | 覆盖 | 用例 |
+   |---|---|---|
+   | `JwtUtilsTest` | JWT 签发/过期/**防篡改/防伪造**/乱码 | 6 |
+   | `CodeTest` | **状态码分类的不变量**（见下） | 5 |
+   | `ResultTest` | 成功/失败语义与 `Code` 的一致性 | 6 |
+
+3. **Dockerfile：去掉 `-DskipTests`，并去掉 `-q`**
+   （`-q` 只留 WARN/ERROR，会把 `Tests run:` 一起压掉，那样"测试到底跑没跑"就看不出来了。
+     日志长一点换可见性，值得。）
+
+##### 值得单独说：`CodeTest` 用的是「不变量测试」
+
+`Code` 里全是常量，而 `Code.isSuccess` 是一份**手写白名单**。这个结构有个典型失效方式：
+
+> 有人加了一个新的 `XXX_OK`，却**忘了同步加进白名单** ——
+> 那个"成功"会被全线当成失败，编译通过、写死的断言也未必覆盖到。
+
+所以这里不写死断言，而是用反射遍历所有常量，断言不变量：
+
+```java
+// 所有 *_OK 必须被判为成功；所有 *_ERR 必须被判为失败
+// 并且先断言「确实扫到了东西」—— 否则筛选条件写错会让测试空跑通过，比不写还危险
+assertThat(okFields).as("没扫到任何 *_OK 常量，说明反射筛选条件写错了").isNotEmpty();
+```
+
+**以后每加一个常量都会自动被检查一遍** —— 这是写死断言做不到的。
+
+##### 验证结果（与 pm-system 同样做了「故意改坏」的验收）
+
+**① 正常**：`mvn -B clean test` → **17 用例 / 0 失败 / BUILD SUCCESS**
+
+**② 故意制造那个典型故障**：新增 `CANCEL_OK = 10009` 但**不加进 `isSuccess` 白名单**：
+
+```
+[ERROR] everyOkConstantIsSuccess  <<< FAILURE!
+Expecting empty but was: ["CANCEL_OK = 10009"]
+[ERROR] Tests run: 17, Failures: 1, Errors: 0, Skipped: 0
+[INFO] BUILD FAILURE
+```
+
+**失败信息直接报出是哪个常量、值是多少** —— 不用去猜。而且它抓住的正是
+「改坏已有逻辑」之外的另一类 bug：**新增代码时的遗漏**。
+
+**③ 还原**：删掉 `CANCEL_OK`，重跑 → 17 用例全绿，`git diff src/main` 无残留。
+
+##### 顺带发现的两个小问题（**没有改**，仅记录）
+
+| 发现 | 说明 |
+|---|---|
+| `JwtUtils` 用**字段注入** | `@Value` 打在 private 字段上、没有构造器 → 测试里只能靠 `ReflectionTestUtils` 反射塞值。改成构造器注入（参数写在构造器上，Spring 一样能注入）就能省掉反射 —— 可测性差是字段注入的典型代价。pm-system 的 `JwtUtil` 就是同样的功能、更好的写法。 |
+| `jwt.expire` 与 `jwt.week` **默认值相同** | 都是 `604800000`（7 天）→ `remember`（记住我）参数目前**实际上不生效**。可能是简化时留下的，也可能是有意的。没有改，因为不确定业务意图。 |
 
 
 ---
@@ -1060,7 +1129,11 @@ ACR 被清空后，第 1 次 push 只产生唯一版本，**第 2 次 push 才�
 |---|---|
 | `.workflow/流水线-202609111434.yml` | 同上；`Build Images` + `Deploy To Aliyun` |
 | `docker-compose.yml` | backend/frontend 用 ACR 镜像；已有 `cloudland.sql` 挂载 |
-| `Dockerfile` | `maven:3.8.6-openjdk-8` → `openjdk:8-jre-slim` |
+| `Dockerfile` | `maven:3.8.6-openjdk-8` → `openjdk:8-jre-slim`；**`mvn clean package` 不带 `-DskipTests`/`-q`**（测试即门禁） |
+| `pom.xml` | Spring Boot **2.7.14 / Java 8**；新增 `spring-boot-starter-test`（此前连测试依赖都没有） |
+| `src/test/.../util/JwtUtilsTest.java` | JWT 安全性质单测（6 用例） |
+| `src/test/.../result/CodeTest.java` | **状态码分类不变量**（5 用例，反射遍历，防"加了常量忘了归类"） |
+| `src/test/.../result/ResultTest.java` | 成功/失败语义与 `Code` 一致性（6 用例） |
 | `vue/Dockerfile` | `node:16-alpine` → `nginx:alpine`，**COPY 带 `vue/` 前缀** |
 | `scripts/deploy.sh` | 同结构（另有 `ensure_host_nginx_stopped`：80 端口被宿主机 nginx 占用时停它）+ `IMAGE_TAG` 解析 |
 | `scripts/rollback.sh` | **回滚**：同 pm-system，容器名/端口按 Cloudland 调整 |
@@ -1155,7 +1228,10 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 - [x] ~~阶段二收尾：云端验证~~ —— **已通过**：构建日志 `Tests run: 24, Failures: 0, Skipped: 1`（§6.2）
 - [ ] **阶段二延伸（可选）**：推一个故意改坏逻辑的提交，在云端闭环验证"构建红 → 部署不执行"；或把 `@SpringBootTest` 用 Testcontainers/H2 救活
 - [ ] 后续写新功能时**同步补测试** —— 门禁的价值随覆盖度增长，不补就等于没加
-- [ ] **Cloudland 的阶段二**：它的 `src/test/` **一个测试都没有**，Dockerfile 也带 `-DskipTests`（门禁完全关闭）。要照搬这套：先摸它的业务代码找出纯逻辑，写测试，再摘掉 `-DskipTests`
+- [x] ~~**Cloudland 的阶段二**~~ —— **已补**：`pom` 加测试依赖 + 3 个纯单元测试（17 用例）+ Dockerfile 去掉 `-DskipTests`/`-q`；本地 17 全绿，且「故意漏归类」验证门禁生效（§6.2）
+- [ ] **Cloudland 阶段二收尾（可选）**：推一次，在云端确认构建日志里有 `Tests run: 17`
+- [ ] Cloudland：`jwt.expire` / `jwt.week` 默认值相同 → `remember` 不生效（确认业务意图后决定改不改）
+- [ ] Cloudland：`JwtUtils` 由字段注入改构造器注入（可测性）
 - [ ] **阶段三收尾**：故障路径待验证 —— 用「提取真实函数 + 一次性容器」的方式，**零影响**（§6.3 给了完整命令，约 90 秒）。关键看输出里的 `restarts >= 1`
 - [ ] 记一笔：`.env` 不参与版本控制，**改过环境变量 schema 之后要重做一次回滚验收**（§6.1 隐性依赖）
 - [ ] 确认 Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段问题）
