@@ -243,11 +243,11 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 |---|---|---|---|---|
 | 提交触发流水线 | CI | ✅ | ✅ | |
 | 自动构建 | CI | ✅ | ✅ | |
-| **自动测试** | **CI 核心** | ❌ | ✅ **已具备** | 23 个纯单元测试跑在 Dockerfile 里（§6.2） |
+| **自动测试** | **CI 核心** | ❌ | ✅ **已具备** | 23 个纯单元测试跑在 Dockerfile 里，云端已实测（§6.2） |
 | 产出镜像 | CI | ✅ | ✅ | tag 已改为 commit SHA |
-| 推送镜像仓库 | CD | ✅ | ✅ | ⚠️ 仓库被误删过，见 §6.1 |
+| 推送镜像仓库 | CD | ✅ | ✅ | 误删后重建已验证：**push 会自动创建仓库**，无需手工建 |
 | 自动部署到生产 | CD | ✅ | ✅ | 加了「过期即跳过」防竞态（§7.10） |
-| 健康检查 | CD | ⚠️ 只盯前端 | ✅ **前后端都查** | 后端还要求「没崩过 + 撑过启动期」（§6.3） |
+| 健康检查 | CD | ⚠️ 只盯前端 | ✅ **前后端都查** | 生产实测 `stable 26s, restarts=0`（§6.3） |
 | 回滚 | CD | ❌ | ✅ 机制已验证 | ⚠️ 当前无可回滚目标（§6.1 事故） |
 
 **当前形态仍是 Continuous Deployment（推到 main 直接上生产，无人为确认）。**
@@ -256,9 +256,9 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 
 | 阶段 | 内容 | 进度 | 状态 |
 |---|---|---|---|
-| **阶段一** | 回滚能力（镜像 tag 版本化） | **~95%** | 机制已验证通过；待 ACR 重建 + 收尾 |
-| **阶段二** | 补上 CI（单元测试） | **100%** | 已实现并本地验证（24 用例 / 改坏逻辑 → 9 失败 + 构建失败）；**待云端验证** |
-| 阶段三 | 健康检查补上后端 | **100%** | 已实现；逻辑层用模拟时钟验证过；**待服务器验收** |
+| **阶段一** | 回滚能力（镜像 tag 版本化） | **~95%** | tag 机制已由构建器原始参数直接证实（§6.1）；回滚已实测通过；待收尾 |
+| **阶段二** | 补上 CI（单元测试） | **100%** | ✅ **云端已验证**：构建日志 `Tests run: 24, Failures: 0`（§6.2） |
+| **阶段三** | 健康检查补上后端 | **~95%** | ✅ 健康路径生产实测 `stable 26s, restarts=0`；故障路径待验证（§6.3） |
 | 阶段四 | 内存与稳定性 | 0% | 可选，按需 |
 
 ### 5.3 核心问题：原问题已解决，但边界要说清
@@ -383,12 +383,22 @@ cd /root/pm-system && /bin/bash scripts/rollback.sh --show
 curl -I http://127.0.0.1:8081
 ```
 
-#### 验证结果：✅ 机制已证实（2026-09-15 12:29）
+#### 验证结果：✅ 机制已证实（2026-09-15）
 
-**证据**：推送后 Gitee 流水线全绿，构建与部署两个阶段都通过。
+**最强证据：构建器打印出了替换后的原始参数**（16:00 那次构建日志）：
 
-**但"绿"本身不是证据** —— 要看清为什么绿能证明 `${GITEE_COMMIT}` 生效。
-下面是一条**闭合的推理链**，每一环都由代码结构强制：
+```
+DOCKER_IMAGE_TAG=pm-frontend:5c4c5c78daf00736c33fe2bd33f9060b3e238d21
+buildctl --addr unix:///run/buildkit/buildkitd.sock build --frontend dockerfile.v0 \
+  --local context=.../pm-system --local dockerfile=.../pm-system/frontend \
+  --output type=image,name=******/pm-frontend:5c4c5c78daf00736c33fe2bd33f9060b3e238d21,push=true
+#17 pushing manifest for ******/pm-frontend:5c4c5c78daf00736c33fe2bd33f9060b3e238d21@sha256:ee68...
+```
+
+`${GITEE_COMMIT}` 被替换成了**完整 40 位 SHA**，直接写在命令行上 ——
+这不再是推理，是构建器的自述。想核实时就照这个搜：**在构建日志里搜 `--output type=image`**。
+
+**辅助证据：流水线全绿本身也是一条闭合的推理链**（每一环都由代码结构强制）：
 
 | 环 | 事实（来自代码） | 若变量没生效会怎样 |
 |---|---|---|
@@ -516,7 +526,7 @@ git diff faa9821 393f8bd -- .env.example docker-compose.yml
 
 ---
 
-### 阶段二：补上 CI（单元测试）—— ✅ 已实现并本地验证（2026-09-15），待云端验证
+### 阶段二：补上 CI（单元测试）—— ✅ 已完成并云端验证通过（2026-09-15）
 
 **目标**：让流水线能拦住「功能错误的提交」。
 
@@ -585,14 +595,28 @@ g.getTotal().compareTo(g.getPlannedEffort()) < 0    // 排满判据
 
 **③ 还原**：改回 `< 0`，重跑 → 24 个测试全绿，`git diff backend/src/main` 无残留。
 
-#### 云端验收（还没做）
+#### 云端验收：✅ 已通过（2026-09-15 15:59，构建号 38）
 
-推一次，然后到 Gitee 流水线页面确认：
+**测试真的在云端跑了** —— 从「构建后端镜像」阶段日志（0.5MB 里搜关键字）：
 
-- 「构建后端镜像」阶段日志里能看到 **`T E S T S`** 与 `Tests run: 24`；
-- 想验证门禁真的生效，就**推一个故意改坏逻辑的提交** → 构建阶段红 → 部署阶段未执行 → 线上不动。
+```
+#16 12.84 [INFO]  T E S T S
+#16 13.61 [WARNING] Tests run: 1, Failures: 0, Errors: 0, Skipped: 1  -- in com.pm.PmApplicationTests
+#16 15.49 [INFO] Tests run: 4, ... -- in ...RequirementStageServiceImplTest$TestAndArchiving
+#16 15.53 [INFO] Tests run: 4, ... -- in ...RequirementStageServiceImplTest$Dev
+#16 15.60 [INFO] Tests run: 7, ... -- in ...RequirementStageServiceImplTest$Pending
+#16 15.64 [INFO] Tests run: 2, ... -- in ...RequirementStageServiceImplTest$ManualFinalStates
+#16 16.24 [INFO] Tests run: 6, ... -- in com.pm.security.JwtUtilTest
+#16 16.29 [WARNING] Tests run: 24, Failures: 0, Errors: 0, Skipped: 1
+#16 17.03 [INFO] BUILD SUCCESS
+```
 
-**验收标准**：故意改坏一个业务逻辑 → 流水线红了 → 线上未受影响。
+与本地**逐项一致**（同样 24 / 0 / 1），`PmApplicationTests` 正确地被 `@Disabled` 跳过。
+测试本身耗时约 3.5 秒，对构建时间影响可忽略。命令里已无 `-DskipTests`。
+
+**还没做的**：推一个故意改坏逻辑的提交，在**云端**确认构建红 → 部署未执行 → 线上不动。
+（本地已完整证明这条链路：改 `<` 为 `<=` → 9 失败 + BUILD FAILURE。
+云端与本地跑的是同一套 surefire，差异只在环境。想彻底闭环可择机做一次。）
 
 #### 这个方案保护不了什么（说清楚边界）
 
@@ -604,7 +628,7 @@ g.getTotal().compareTo(g.getPlannedEffort()) < 0    // 排满判据
 
 ---
 
-### 阶段三：健康检查补上后端 —— ✅ 已实现（2026-09-15），待服务器验收
+### 阶段三：健康检查补上后端 —— ✅ 已实现，健康路径已在生产验证（2026-09-15）
 
 **目标**：后端崩溃不再被漏报成「部署成功」。
 
@@ -678,10 +702,42 @@ wait_for_container "$FRONTEND_CONTAINER" 0   # 前端是 nginx，起来即就绪
 ⚠️ 模拟刻意采用**对旧方案最有利**的假设（`status` 永远返回 `running`），
 这正是 Spring Boot 启动期崩溃的真实形态。
 
-#### 服务器端验收（还没做）
+#### 服务器端验收：健康路径 ✅ 已通过；故障路径 ⏳ 待验证
+
+**① 健康路径：已在生产验证通过**（2026-09-15 16:00，构建号 38 的部署日志）：
+
+```
+15:59:58 Container pm-backend Started
+16:00:24 Container pm-backend healthy: stable 26s (need >= 25s), restarts=0
+16:00:24 Container pm-frontend healthy: stable 0s (need >= 0s), restarts=0
+16:00:25 pm-backend ... Up 27 seconds
+16:00:25 Deployment finished
+```
+
+证明了三件事：新代码在**真实服务器**上正常执行；`min_stable=25` 的实际等待就是 26 秒
+（与设计一致）；不误报。顺带确认部署耗时增加了约 26 秒 —— 这是这一层检查的固定成本。
+
+**② 故障路径：还没在服务器上验证过。**
+
+模拟测试证明了逻辑正确，但有一个假设是模拟无法覆盖的：
+**在这台服务器的 Docker 上，crash-loop 的容器 `RestartCount` 真的会递增吗？**
+（这是整套判据的承重点。Docker 的行为众所周知，但按 §7.9.3「外部规则必须实测」，
+ 它值得被测一次。）
+
+**推荐做法 —— 零影响，不碰线上的任何容器：**
 
 ```bash
-# 临时把 DB_URL 改坏，然后手动部署一次
+# 用一个一次性容器制造 crash-loop，验证 RestartCount 会不会涨
+docker run -d --name hc-test --restart always alpine sh -c 'sleep 5; exit 1'
+sleep 15
+docker inspect -f 'status={{.State.Status}} restarts={{.RestartCount}}' hc-test
+# 期望：restarts >= 1（崩溃被计数）—— 这就是阶段三判据的承重点
+docker rm -f hc-test
+```
+
+**备选：完整的端到端验收**（会短暂影响线上，选低峰）
+
+```bash
 cd /root/pm-system
 cp .env .env.bak
 sed -i 's#^DB_URL=.*#DB_URL=jdbc:mysql://mysql:9999/nope#' .env
@@ -690,12 +746,11 @@ cp .env.bak .env                          # 恢复
 /bin/bash scripts/deploy.sh main          # 期望：恢复正常
 ```
 
-**验收标准**：部署报失败并打印日志，且**线上旧版本未被搞停**（失败发生在 `up -d` 之后，
-容器会被重建 —— 所以这次验收**会短暂影响线上**，选个低峰时段做）。
+**验收标准**：部署报失败并打印日志。
 
 > 注意：健康检查失败是在 `up -d` **之后**触发的，此时新容器已经起来了。
 > 也就是说**这一层检查保护的是"不会被误报成功"，不是"线上不会被搞坏"**。
-> 真正阻止坏版本上线的还是 `pull` 前置 + 镜像构建门禁（阶段二会再补测试门禁）。
+> 真正阻止坏版本上线的还是 `pull` 前置 + 镜像构建门禁（阶段二的测试门禁已接上）。
 
 ---
 
@@ -1028,18 +1083,18 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 
 **优先级从高到低：**
 
-- [x] **阶段一**：镜像 tag 版本化 + 回滚能力 —— 代码已上线；tag 机制已验证生效；pm-system 回滚机制已验证通过（§6.1）
+- [x] **阶段一**：镜像 tag 版本化 + 回滚能力 —— tag 机制已由构建器原始参数直接证实；pm-system 回滚已实测通过（§6.1）
+- [x] ~~阶段一收尾 D：确认构建能正常推送~~ —— **已实测：push 会自动创建仓库，无需手工建**（16:00 那次构建）
+- [x] ~~阶段一收尾 E：`grep 'DIAG GITEE_COMMIT'`~~ —— 已实测有值（构建号 38 那行），并据此改掉了竞态（§7.10）
 - [ ] **阶段一收尾 A**：⚠️ **确认 Cloudland 服务器当前停在哪个版本** —— 14:57 发起过回滚（目标是 `442178c`），若确认了 `yes`，现在线上就在回滚点。查：`cat /var/log/cloudland-current-tag`，若是回滚点则用 `cd /root/cloudland && /bin/bash scripts/deploy.sh main` 带回最新
-- [ ] **阶段一收尾 B**：清理废弃 `:latest` —— 🔴 **注意 15:05 的事故：必须先点「管理」进入仓库，只删镜像版本列表里 `latest` 那一行，绝不点仓库列表的「删除」**。若已误删（当前状态），跳过此项
-- [ ] **阶段一收尾 C**：**重新积累回滚点** —— 每次 push 产生一个 SHA tag，**再推 2 次**才能重新具备"可回滚"能力（§7.11）
-- [ ] **阶段一收尾 D**：确认下一次构建能正常推送 —— ACR 仓库被删过，若构建阶段报"仓库不存在"，先在控制台建 4 个同名**空**仓库
-- [ ] **阶段一收尾 E**：`grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log` —— 已实测有值并据此改掉竞态（§7.10），这行现为常驻审计线索
+- [ ] **阶段一收尾 B**：清理废弃 `:latest`（若还有）—— 🔴 **必须先点「管理」进入仓库，只删镜像版本列表里 `latest` 那一行，绝不点仓库列表的「删除」**。四个仓库已误删过，重建后可能已无 `latest`
+- [ ] **阶段一收尾 C**：**重新积累回滚点** —— 16:00 那次已产生第 1 个 SHA tag；**再推 1 次**（共 2 个）才重新具备"可回滚"能力（§7.11）
 - [x] **阶段二**：补上 CI（单元测试）—— 23 个纯单元测试 + 摘掉 `-DskipTests` + `@Disabled` 掉 `@SpringBootTest`（§6.2）
-- [ ] **阶段二收尾**：云端验证 —— 推一次，确认构建阶段日志里有 `Tests run: 24`；再推一个故意改坏逻辑的提交，确认构建红、部署未执行、线上不动
-- [ ] **阶段二延伸（可选）**：`@SpringBootTest` 用 Testcontainers/H2 救活，让它也能上云；或加回 `build@maven` 独立测试 job 让报错更早更清楚
+- [x] ~~阶段二收尾：云端验证~~ —— **已通过**：构建日志 `Tests run: 24, Failures: 0, Skipped: 1`（§6.2）
+- [ ] **阶段二延伸（可选）**：推一个故意改坏逻辑的提交，在云端闭环验证"构建红 → 部署不执行"；或把 `@SpringBootTest` 用 Testcontainers/H2 救活
 - [ ] 后续写新功能时**同步补测试** —— 门禁的价值随覆盖度增长，不补就等于没加
 - [ ] **Cloudland 的阶段二**：它的 `src/test/` **一个测试都没有**，Dockerfile 也带 `-DskipTests`（门禁完全关闭）。要照搬这套：先摸它的业务代码找出纯逻辑，写测试，再摘掉 `-DskipTests`
-- [ ] **阶段三收尾**：服务器上做一次验收 —— 改坏 `DB_URL` → 部署应报失败并打印日志。⚠️ 失败发生在 `up -d` 之后，**会短暂影响线上**，选低峰时段（§6.3）
+- [ ] **阶段三收尾**：故障路径待验证。**推荐零影响做法**：用一次性容器验证 `RestartCount` 会递增（§6.3）；完整的 `DB_URL` 端到端验收会短暂影响线上，择机
 - [ ] 记一笔：`.env` 不参与版本控制，**改过环境变量 schema 之后要重做一次回滚验收**（§6.1 隐性依赖）
 - [ ] 确认 Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段问题）
 - [x] ~~清理 `backend/Dockerfile` 第 27 行过时注释（写着"测试在 CI 跑"，实际没有）~~ —— 阶段二已顺手修掉，并把测试真的接上了
