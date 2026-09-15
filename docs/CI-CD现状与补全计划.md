@@ -285,10 +285,14 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 | 项 | 位置 | 性质 |
 |---|---|---|
 | 🔴 **初始管理员密码未改**（`admin` / `Pm@123456` 是公开的） | 服务器 | **安全问题，公网可访问** |
-| `deploy.sh` 健康检查只盯前端 | 两项目 | 阶段三 |
+| ⚠️ **回滚能力当前为零** | ACR | 历史镜像被误删，需推 2 次重新积累（§6.1、§7.11） |
+| Cloudland 的 CI 门禁完全关闭（无测试 + `-DskipTests`） | Cloudland | 阶段二还没做到它 |
 | Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段） | 流水线 | 待验证 |
-| `backend/Dockerfile` 第 27 行过时注释（写着"测试在 CI 跑"，实际没有） | pm-system | 顺手清理 |
 | Cloudland 首页标语不统一 | `HomeView.vue` / `LoginForm.vue` | 低优先 |
+
+**已清掉的**（留档，说明这些坑踩过）：
+- ~~`deploy.sh` 健康检查只盯前端~~ → 阶段三已补
+- ~~`backend/Dockerfile` 过时注释（"测试在 CI 跑"）~~ → 阶段二已修，且测试真的接上了
 
 ---
 
