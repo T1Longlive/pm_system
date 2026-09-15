@@ -6,7 +6,7 @@
 #   - set -Eeuo pipefail：任一命令失败即退出，不吞错
 #   - flock：并发保护（两次部署同时跑会把容器状态搞乱）
 #   - 镜像按 commit SHA 取 tag（不再是 latest）→ 因此可回滚
-#   - 健康检查：等前端容器真正 running 才算成功
+#   - 健康检查：后端 + 前端都查；后端还要求「没崩过 + 撑过启动期」
 #   - 失败时打印容器日志，便于在流水线页面直接定位
 #
 # 用法：
@@ -28,6 +28,7 @@ TARGET_COMMIT="${TARGET_COMMIT:-}"
 LOCK_FILE="/tmp/pm-system-deploy.lock"
 LOG_FILE="/var/log/pm-system-deploy.log"
 CURRENT_TAG_FILE="/var/log/pm-system-current-tag"
+BACKEND_CONTAINER="pm-backend"
 FRONTEND_CONTAINER="pm-frontend"
 FRONTEND_PORT="8081"
 
@@ -162,28 +163,61 @@ log "Starting containers"
 $DC up -d --remove-orphans --force-recreate
 
 # ---------- 健康检查 ----------
-wait_for_frontend() {
-  local retries=12
+# 阶段三：后端崩溃不再被漏报成「部署成功」。
+#
+# 三个条件缺一不可，只查任何一个都会漏报：
+#   1) status=running            容器活着
+#   2) RestartCount=0            从创建起没崩过。
+#      启动即崩的容器（如 DB 连不上）在 restart 策略下大部分时间也是 running
+#      —— 每轮 JVM 要 boot ~12s 才崩，只看状态会在崩溃发生前就放行。
+#   3) 连续 running ≥ min_stable  撑过了应用自身的启动期。
+#      up -d 返回时 Spring Boot 还在 booting，此刻 status 必然是 running，
+#      什么都不证明。后端启动实测 ~12s，给 25s 余量。
+#
+# 已知局限（有意为之）：应用「卡死但不退出」查不出来。
+# 那需要 HTTP 探活（actuator/health 之类），暂不引入 ——
+# 等真的出现过这类故障再补，别为没发生过的故障加复杂度。
+wait_for_container() {
+  local name="$1"
+  local min_stable="${2:-0}"
+  local retries=18
   local delay=5
   local status=""
+  local restarts=0
+  local first_running=0
+  local up=0
 
   for _ in $(seq 1 "$retries"); do
-    status="$(docker inspect -f '{{.State.Status}}' "$FRONTEND_CONTAINER" 2>/dev/null || true)"
+    status="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || true)"
+    restarts="$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null || echo 0)"
+    restarts="${restarts:-0}"
+
     if [ "$status" = "running" ]; then
-      log "Frontend container is running"
-      return 0
+      if [ "$first_running" -eq 0 ]; then first_running="$(date +%s)"; fi
+      up=$(( $(date +%s) - first_running ))
+      if [ "$restarts" -eq 0 ] && [ "$up" -ge "$min_stable" ]; then
+        log "Container $name healthy: stable ${up}s (need >= ${min_stable}s), restarts=0"
+        return 0
+      fi
+    else
+      first_running=0
+      up=0
     fi
     sleep "$delay"
   done
 
-  log "Frontend container failed to reach running state, current status: ${status:-missing}"
+  log "Container $name FAILED health check: status=${status:-missing}, restarts=${restarts}, stable=${up}s (need >= ${min_stable}s)"
+  log "Dumping container status and logs for diagnosis"
   $DC ps | tee -a "$LOG_FILE" >/dev/null || true
-  $DC logs --tail=200 frontend | tee -a "$LOG_FILE" >/dev/null || true
   $DC logs --tail=200 backend  | tee -a "$LOG_FILE" >/dev/null || true
+  $DC logs --tail=200 frontend | tee -a "$LOG_FILE" >/dev/null || true
   exit 1
 }
 
-wait_for_frontend
+# 先查后端：它要连 DB、要完成 Spring 上下文，最容易在启动期失败，也最致命。
+# 前端是 nginx，起来即就绪，不需要稳定期。
+wait_for_container "$BACKEND_CONTAINER" 25
+wait_for_container "$FRONTEND_CONTAINER" 0
 
 # ---------- 固化「当前线上版本」的证据 ----------
 # 容器实际用的镜像地址是最好的证据：它同时证明了 tag 生效、且确实来自 ACR。

@@ -247,7 +247,7 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 | 产出镜像 | CI | ✅ | ✅ | tag 已改为 commit SHA |
 | 推送镜像仓库 | CD | ✅ | ✅ | ⚠️ 仓库被误删过，见 §6.1 |
 | 自动部署到生产 | CD | ✅ | ✅ | 加了「过期即跳过」防竞态（§7.10） |
-| 健康检查 | CD | ⚠️ 只盯前端 | ⚠️ **仍只盯前端** | 阶段三未开始 |
+| 健康检查 | CD | ⚠️ 只盯前端 | ✅ **前后端都查** | 后端还要求「没崩过 + 撑过启动期」（§6.3） |
 | 回滚 | CD | ❌ | ✅ 机制已验证 | ⚠️ 当前无可回滚目标（§6.1 事故） |
 
 **当前形态仍是 Continuous Deployment（推到 main 直接上生产，无人为确认）。**
@@ -258,7 +258,7 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 |---|---|---|---|
 | **阶段一** | 回滚能力（镜像 tag 版本化） | **~95%** | 机制已验证通过；待 ACR 重建 + 收尾 |
 | **阶段二** | 补上 CI（单元测试） | **0%** | **未开始 —— 当前最大的窟窿** |
-| 阶段三 | 健康检查补上后端 | **0%** | 未开始（改动极小，性价比最高） |
+| 阶段三 | 健康检查补上后端 | **100%** | 已实现；逻辑层用模拟时钟验证过；**待服务器验收** |
 | 阶段四 | 内存与稳定性 | 0% | 可选，按需 |
 
 ### 5.3 核心问题（没变）
@@ -527,35 +527,98 @@ git diff faa9821 393f8bd -- .env.example docker-compose.yml
 
 ---
 
-### 阶段三：健康检查补上后端
+### 阶段三：健康检查补上后端 —— ✅ 已实现（2026-09-15），待服务器验收
 
 **目标**：后端崩溃不再被漏报成「部署成功」。
 
-**现状**：两个项目的 `deploy.sh` 都只有 `wait_for_frontend()`，
-**只 `docker inspect` 前端容器**。
+**改动前**：两个项目的 `deploy.sh` 都只有 `wait_for_frontend()`，**只 `docker inspect` 前端容器**。
 
-**改法**（两项目同样处理）：
+#### ⚠️ 原方案有漏洞 —— 照抄会验收不过自己的标准
+
+本文档原先给的改法是「`wait_for_container` 检查 `status == running`」。**这不够**：
+
+1. `docker compose up -d` 返回时，**Spring Boot 还在 booting**（实测启动 ~12s），
+   此刻 `status` 必然是 `running` —— 什么都不证明。
+2. 启动即崩的容器（如 DB 连不上）在 `restart: unless-stopped` 下会**反复重启**，
+   而每轮 JVM 要 boot 十几秒才崩，**所以容器绝大部分时间都处于 running**。
+   于是「查到 running 就通过」会在崩溃发生**之前**就放行。
+
+**结果就是：改坏 DB_URL 的验收测试照样会「部署成功」。**
+
+#### 实际采用的条件：三个，缺一不可
 
 ```bash
 wait_for_container() {
-  local name="$1" retries=12 delay=5 status=""
+  local name="$1" min_stable="${2:-0}" retries=18 delay=5
+  local status="" restarts=0 first_running=0 up=0
   for _ in $(seq 1 "$retries"); do
     status="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || true)"
-    if [ "$status" = "running" ]; then log "Container $name is running"; return 0; fi
+    restarts="$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null || echo 0)"
+    if [ "$status" = "running" ]; then
+      if [ "$first_running" -eq 0 ]; then first_running="$(date +%s)"; fi
+      up=$(( $(date +%s) - first_running ))
+      if [ "$restarts" -eq 0 ] && [ "$up" -ge "$min_stable" ]; then
+        log "Container $name healthy: stable ${up}s (need >= ${min_stable}s), restarts=0"
+        return 0
+      fi
+    else
+      first_running=0; up=0
+    fi
     sleep "$delay"
   done
-  log "Container $name failed to reach running state, status: ${status:-missing}"
-  $DC ps | tee -a "$LOG_FILE" >/dev/null || true
-  $DC logs --tail=200 backend  | tee -a "$LOG_FILE" >/dev/null || true
-  $DC logs --tail=200 frontend | tee -a "$LOG_FILE" >/dev/null || true
-  exit 1
+  # ... 打印状态与日志后 exit 1
 }
 
-wait_for_container "pm-backend"      # ← 先后端（更可能失败）
-wait_for_container "pm-frontend"
+wait_for_container "$BACKEND_CONTAINER" 25   # 后端：要撑过启动期
+wait_for_container "$FRONTEND_CONTAINER" 0   # 前端是 nginx，起来即就绪
 ```
 
-**验收标准**：手动让后端启动失败（如临时改坏 DB_URL）→ 部署应报失败并打印日志。
+| 条件 | 作用 |
+|---|---|
+| `status=running` | 容器活着 |
+| **`RestartCount=0`** | **从创建起没崩过 —— 抓住 crash-loop 的关键**（`up -d --force-recreate` 保证容器是新建的，计数从 0 起） |
+| **`up >= min_stable`** | **撑过了应用自身的启动期**，排除「刚起来还没崩」的假阳性 |
+
+**已知局限（有意不补）**：应用「卡死但不退出」查不出来，那需要 HTTP 探活。
+等真的出现过这类故障再加 —— 别为没发生过的故障加复杂度。
+
+#### 验证：逻辑层已用模拟时钟跑过（本地）
+
+本地无 Docker 守护进程，但需要验证的是**判断逻辑**（三个条件的组合），
+不是 `docker inspect` 那一行调用。用可控的 `docker` / `sleep` / `date` 替身，
+精确控制"每一时刻容器是什么状态"：
+
+| 用例 | 场景 | 结果 | 关键证据 |
+|---|---|---|---|
+| A | 健康容器（min_stable=3） | **PASS** | `stable 4s (need >= 3s), restarts=0` |
+| B | 5 秒后崩溃（min_stable=8） | **FAIL** | `status=running, restarts=2, **stable=8s (need >= 8s)**` |
+| C | **旧逻辑**（只查 status）+ 同一场景 | **PASS** ← 漏报 | 首次轮询即放行 |
+
+**B 的日志是决定性的**：`stable=8s` 已满足 `min_stable`，**拦住它的只有 `restarts=2`**
+—— 证明 RestartCount 条件是承重的，不是装饰。
+**C 用同一场景跑原方案直接放行 —— 漏洞是实测出来的，不是推演出来的。**
+
+⚠️ 模拟刻意采用**对旧方案最有利**的假设（`status` 永远返回 `running`），
+这正是 Spring Boot 启动期崩溃的真实形态。
+
+#### 服务器端验收（还没做）
+
+```bash
+# 临时把 DB_URL 改坏，然后手动部署一次
+cd /root/pm-system
+cp .env .env.bak
+sed -i 's#^DB_URL=.*#DB_URL=jdbc:mysql://mysql:9999/nope#' .env
+/bin/bash scripts/deploy.sh main          # 期望：健康检查 FAILED，打印后端日志，退出非 0
+cp .env.bak .env                          # 恢复
+/bin/bash scripts/deploy.sh main          # 期望：恢复正常
+```
+
+**验收标准**：部署报失败并打印日志，且**线上旧版本未被搞停**（失败发生在 `up -d` 之后，
+容器会被重建 —— 所以这次验收**会短暂影响线上**，选个低峰时段做）。
+
+> 注意：健康检查失败是在 `up -d` **之后**触发的，此时新容器已经起来了。
+> 也就是说**这一层检查保护的是"不会被误报成功"，不是"线上不会被搞坏"**。
+> 真正阻止坏版本上线的还是 `pull` 前置 + 镜像构建门禁（阶段二会再补测试门禁）。
 
 ---
 
@@ -892,7 +955,8 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 - [ ] **阶段一收尾 D**：确认下一次构建能正常推送 —— ACR 仓库被删过，若构建阶段报"仓库不存在"，先在控制台建 4 个同名**空**仓库
 - [ ] **阶段一收尾 E**：`grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log` —— 已实测有值并据此改掉竞态（§7.10），这行现为常驻审计线索
 - [ ] **阶段二**：补纯单元测试，测试跑在 Dockerfile 里（§6.2）
-- [ ] **阶段三**：`deploy.sh` 健康检查补上后端（§6.3）—— 注意回滚脚本共用同一个健康检查，改一处覆盖两个场景
+- [x] **阶段三**：`deploy.sh` 健康检查补上后端 —— 已实现（两项目 + 回滚脚本共用同一函数），逻辑层已验证（§6.3）
+- [ ] **阶段三收尾**：服务器上做一次验收 —— 改坏 `DB_URL` → 部署应报失败并打印日志。⚠️ 失败发生在 `up -d` 之后，**会短暂影响线上**，选低峰时段（§6.3）
 - [ ] 记一笔：`.env` 不参与版本控制，**改过环境变量 schema 之后要重做一次回滚验收**（§6.1 隐性依赖）
 - [ ] 确认 Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段问题）
 - [ ] 清理 `backend/Dockerfile` 第 27 行过时注释（写着"测试在 CI 跑"，实际没有）
