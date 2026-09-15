@@ -215,9 +215,10 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 
 ## 6. 补全计划
 
-### 阶段一：回滚能力 —— ✅ 机制已实现并验证（2026-09-15，两个项目）
+### 阶段一：回滚能力 —— ✅ 已完成并验收通过（2026-09-15，两个项目）
 
-**状态**：tag 版本化**已验证生效**（见下方证据链）；回滚脚本已就位但**尚未执行过验收**。
+**状态**：tag 版本化**已验证生效**（§6.1 证据链）；pm-system 回滚**已实测通过**（§6.1 回滚验收）；
+Cloudland 代码同源、待跑一次回滚验收。
 
 **目标**：能退回任意历史版本。
 
@@ -331,30 +332,71 @@ curl -I http://127.0.0.1:8081
 grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log | tail -1
 ```
 
-#### 还没做的一步：回滚本身的验收
+#### 回滚验收：✅ 已通过（2026-09-15 14:34，pm-system）
 
-**上面的验证只证明了「tag 版本化可用」，没有证明「回滚可用」。**
-`scripts/rollback.sh` 至今**从未被执行过**，它的正确性还是纸面推理。
-阶段一的验收标准是「能部署上一版镜像并确认服务正常」—— 这一条尚未满足。
+执行 `rollback.sh faa9821`（从 `393f8bd` 退回），日志逐步印证了整条回滚路径：
 
-```bash
-# 1) 先看现状，顺便验证 --show 分支
-cd /root/pm-system && /bin/bash scripts/rollback.sh --show
+| 日志行 | 证明了什么 |
+|---|---|
+| `Verifying images exist in ACR` → 两张镜像拉取成功 | ACR 上**保留了历史 tag 镜像** |
+| `Rollback target : faa9821...` / `Current HEAD : 393f8bd...` | 短 SHA 解析成完整 SHA，两个版本被正确区分 |
+| 要求输 `yes` → 输入后继续 | 交互确认生效（没有非交互静默退出） |
+| `Rollback mode: checking out faa9821...` | **回滚专属代码路径**被走到（平时部署不走这里） |
+| `HEAD is now at faa9821` | 代码真的退到目标提交 |
+| `Image tag : faa9821cde4c690b4def0a9833b2f7f153e66fb8 (source: git rev-parse HEAD)` | tag 从**新 HEAD** 推导，与目标一致 |
+| `docker compose pull` → backend/frontend 均 Pulled | 旧 tag 从 ACR 拉成功 |
+| 4 个容器 `Started` / mysql `Healthy` | 用旧镜像重建成功 |
+| `Frontend container is running` | 健康检查通过 |
+| `docker compose ps` 显示两个容器镜像 = `:faa9821...` | **最终状态正确**（这是最硬的证据） |
+| `http://8.137.114.176:8081` 返回 200 | 回滚后服务正常 |
 
-# 2) 制造一个已知的坏版本：改一行前端文案，push，等它上线，确认页面是坏的样子
+**结论：阶段一验收标准「能部署上一版镜像并确认服务正常」已满足。**
 
-# 3) 回滚到上一条提交（用坏版本之前那个 SHA）
-/bin/bash scripts/rollback.sh <上一个SHA>
+##### 这次验收顺带证明的两件事（容易被当成理所当然）
 
-# 4) 确认页面回到改坏之前
-curl -I http://127.0.0.1:8081
+1. **ACR 确实保留了历史 tag 镜像。**
+   整条回滚链路的前提是「旧版本的镜像还在」。如果 ACR 会被清理、
+   或者部署时顺手 `docker rmi` 掉旧镜像并推到远端，回滚就是空谈。
+   **这条前提必须被验证过，不能假设。**
+
+2. **旧提交的 compose 与当前的 `.env` 仍然兼容。**
+   见下面的「隐性依赖」—— 这是回滚最容易被忽略的风险点。
+
+##### ⚠️ 回滚的隐性依赖：`.env` 不会跟着回滚
+
+`.env` 在 `.gitignore` 里，**它不参与版本控制**，所以：
+
+```
+回滚时：代码退回旧提交 ✔    但 .env 仍是当前的 ✘
 ```
 
-第 3 步应该依次看到：解析出完整 SHA → ACR 上有该镜像 → 提示当前 HEAD 与目标不同 → 要求输 `yes`
-→ `Rollback mode: checking out <sha>` → `Image tag` 等于目标 SHA → 健康检查通过。
+于是「旧 compose / 旧代码」会去读「新的 .env」。这次没事，因为环境变量 schema 没变。
+但若将来发生过这些改动，回滚就会失败或被静默降级：
 
-**特别注意**：回滚只能退到「tag 版本化之后」的提交。
-`faa9821` 是本项目第一个带 SHA tag 的提交，**它就是可回滚的最早边界**。
+| 场景 | 后果 |
+|---|---|
+| 新版本**新增**了一个必需环境变量，回滚到添加之前 | 旧代码读不到该变量 → 启动失败或走错默认值 |
+| 新版本**删除/改名**了变量，回滚到使用旧名的版本 | 同上 |
+| 新版本改过 `DB_URL` 之类的连接串格式 | 旧代码解析不了 |
+
+**所以回滚验证要在"改过 .env schema"之后重做一次**，
+或者至少在回滚前 `diff` 一下两个版本对 `.env` 的要求：
+
+```bash
+# 看两个版本之间 .env.example / compose 的环境变量差异
+git diff faa9821 393f8bd -- .env.example docker-compose.yml
+```
+
+`.env` 本身建议**在服务器上留一份带日期的备份**，回滚前手动切换。
+
+##### 还没做的：Cloudland 的回滚验收
+
+脚本结构完全同源，`ensure_host_nginx_stopped` 也在每次正常部署里持续验证着。
+想稳妥就跑一次 `rollback.sh 442178c`（Cloudland 可回滚的最早边界）。
+
+**可回滚边界**（已用 git 逐提交核对）：
+- pm-system：`393f8bd` / `039ec3c` / `faa9821`；`0b5bb18` 及更早**不可回滚**
+- Cloudland：`87c63f7` / `442178c`；`92c681c` 及更早**不可回滚**
 
 ---
 
@@ -695,12 +737,14 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 
 **优先级从高到低：**
 
-- [x] **阶段一**：镜像 tag 版本化 + 回滚能力 —— 两个项目代码已上线（pm-system `faa9821`、Cloudland `442178c`），**tag 机制已验证生效**（§6.1 证据链）
-- [ ] **阶段一收尾 A（重要）**：实际执行一次回滚验收 —— `rollback.sh` 至今未跑过，正确性仍是纸面推理（§6.1）
-- [ ] **阶段一收尾 B**：在 ACR 控制台删掉 `pm-*:latest` / `cloudland-*:latest`，杜绝误用
-- [ ] **阶段一收尾 C（可选）**：`grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log`，有值就可按 §7.10 升级消除并发竞态
+- [x] **阶段一**：镜像 tag 版本化 + 回滚能力 —— 两个项目代码已上线；tag 机制已验证生效；**pm-system 回滚已实测通过**（§6.1）
+- [ ] **阶段一收尾 A**：Cloudland 跑一次回滚验收（`rollback.sh 442178c`）—— 脚本同源，风险低，但没跑过就是没跑过
+- [ ] **阶段一收尾 B**：把线上从回滚点带回最新（`cd /root/pm-system && /bin/bash scripts/deploy.sh main`），顺便验证「回滚是临时止血，下次部署自动回到最新」
+- [ ] **阶段一收尾 C**：在 ACR 控制台删掉 `pm-*:latest` / `cloudland-*:latest`，杜绝误用
+- [ ] **阶段一收尾 D**：`grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log` —— **注意只能看流水线触发的部署**，手工执行时 Gitee 变量必为 `<unset>`
 - [ ] **阶段二**：补纯单元测试，测试跑在 Dockerfile 里（§6.2）
 - [ ] **阶段三**：`deploy.sh` 健康检查补上后端（§6.3）—— 注意回滚脚本共用同一个健康检查，改一处覆盖两个场景
+- [ ] 记一笔：`.env` 不参与版本控制，**改过环境变量 schema 之后要重做一次回滚验收**（§6.1 隐性依赖）
 - [ ] 确认 Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段问题）
 - [ ] 清理 `backend/Dockerfile` 第 27 行过时注释（写着"测试在 CI 跑"，实际没有）
 - [ ] 按需：JVM 堆上限 / 加 swap / 升级 ECS 到 4G（§6.4）
