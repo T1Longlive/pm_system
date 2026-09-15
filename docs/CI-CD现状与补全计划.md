@@ -267,7 +267,7 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 
 | 阶段 | 内容 | 进度 | 状态 |
 |---|---|---|---|
-| **阶段一** | 回滚能力（镜像 tag 版本化） | **~98%** | tag 机制已由构建器原始参数直接证实；回滚已实测通过；**ACR 现有 2 个版本，能力已恢复** |
+| **阶段一** | 回滚能力（镜像 tag 版本化） | **100%** | ✅ tag 机制由构建器原始参数直接证实；回滚**用新 tag 实测通过**（§6.1） |
 | **阶段二** | 补上 CI（单元测试） | **100%** | ✅ **云端已验证**：构建日志 `Tests run: 24, Failures: 0`（§6.2） |
 | **阶段三** | 健康检查补上后端 | **~95%** | ✅ 健康路径生产实测 `stable 26s, restarts=0`；故障路径待验证（§6.3） |
 | 阶段四 | 内存与稳定性 | 0% | 可选，按需 |
@@ -314,11 +314,11 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 
 ## 6. 补全计划
 
-### 阶段一：回滚能力 —— ✅ 机制已实现并验证（2026-09-15，两个项目）
+### 阶段一：回滚能力 —— ✅ 已完成并实测通过（2026-09-15，pm-system）
 
-**状态**：tag 版本化**已验证生效**（构建器原始参数为证）；pm-system 回滚机制**已实测通过**。
-ACR 曾因误删导致历史镜像全失（§6.1 事故记录），**现已恢复** —— 两个 SHA 版本在手，
-可随时回退。Cloudland 那边还差一次推送才具备同样的能力。
+**状态**：tag 版本化**已验证生效**（构建器原始参数为证）；回滚**用新 tag 实测通过**。
+ACR 误删事故已被两次推送自然补齐（§6.1）。
+**Cloudland 还差一次推送**才具备同样的能力（它现在只有 0 个可回退版本）。
 
 **目标**：能退回任意历史版本。
 
@@ -739,23 +739,64 @@ wait_for_container "$FRONTEND_CONTAINER" 0   # 前端是 nginx，起来即就绪
 
 **② 故障路径：还没在服务器上验证过。**
 
-模拟测试证明了逻辑正确，但有一个假设是模拟无法覆盖的：
-**在这台服务器的 Docker 上，crash-loop 的容器 `RestartCount` 真的会递增吗？**
-（这是整套判据的承重点。Docker 的行为众所周知，但按 §7.9.3「外部规则必须实测」，
- 它值得被测一次。）
+模拟测试证明了判断逻辑正确，但有一个假设是模拟**无法**覆盖的：
 
-**推荐做法 —— 零影响，不碰线上的任何容器：**
+> **在这台服务器的 Docker 上，crash-loop 容器的 `RestartCount` 真的会递增吗？**
+
+这是整套判据的承重点（模拟里正是它拦住了 TEST B）。Docker 的行为众所周知，
+但按 §7.9.3「外部规则必须实测」，它值得被测一次。
+
+**推荐做法：零影响，且测的是真代码**
+
+不用改坏 `DB_URL`，也不用碰 pm-system 的任何容器 —— 把 `deploy.sh` 里的真实函数
+**提取出来**，去判一个一次性容器：
 
 ```bash
-# 用一个一次性容器制造 crash-loop，验证 RestartCount 会不会涨
-docker run -d --name hc-test --restart always alpine sh -c 'sleep 5; exit 1'
-sleep 15
-docker inspect -f 'status={{.State.Status}} restarts={{.RestartCount}}' hc-test
-# 期望：restarts >= 1（崩溃被计数）—— 这就是阶段三判据的承重点
+cd /root/pm-system
+
+# ① 提取真实的 wait_for_container（测真代码，不测抄本）
+sed -n '/^wait_for_container()/,/^}/p' scripts/deploy.sh > /tmp/hc-func.sh
+wc -l /tmp/hc-func.sh          # 十几行
+
+# ② 起一个"启动 5 秒后崩溃"的一次性容器（用本地已有的镜像，不触发拉取）
+docker rm -f hc-test >/dev/null 2>&1 || true
+docker run -d --name hc-test --restart always redis:7-alpine sh -c 'sleep 5; exit 1'
+
+# ③ 用真实函数判它 —— 期望：报 FAILED 并以退出码 1 结束
+bash -c '
+  log(){ echo "[test] $*"; }
+  DC=true
+  LOG_FILE=/dev/null
+  source /tmp/hc-func.sh
+  wait_for_container hc-test 25
+  echo "!!! 不该走到这里 —— 说明没拦住"
+'
+echo "退出码 = $?   （期望 1）"
+
+# ④ 收尾
 docker rm -f hc-test
+rm -f /tmp/hc-func.sh
 ```
 
-**备选：完整的端到端验收**（会短暂影响线上，选低峰）
+**耗时约 90 秒**（函数固定 18 次 × 5 秒 —— 失败路径必然会把重试跑满），别以为卡住了。
+
+期望输出：
+
+```
+[test] Container hc-test FAILED health check: status=running, restarts=3, stable=25s (need >= 25s)
+[test] Dumping container status and logs for diagnosis
+退出码 = 1
+```
+
+**关键看 `restarts=`**：
+- `restarts >= 1` ⇒ 承重假设成立，整套判据在真实环境有效 ✅
+- `restarts = 0` ⇒ **假设不成立**，阶段三的判据要重新设计（到时候告诉我）
+
+还有一处值得对照：成功路径生产日志里是 `stable 26s (need >= 25s), restarts=0`（通过）；
+这里应该是 `stable 25s (need >= 25s), restarts=3`（失败）。
+**两次的 `stable` 都够 `min_stable`，区别全在 `restarts`** —— 和模拟里 TEST B 的特征完全一致。
+
+**备选：完整的端到端验收**（会短暂影响线上，选低峰 —— 一般没必要做）
 
 ```bash
 cd /root/pm-system
@@ -1109,13 +1150,13 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 - [ ] **阶段一收尾 A**：⚠️ **确认 Cloudland 服务器当前停在哪个版本** —— 14:57 发起过回滚（目标是 `442178c`），若确认了 `yes`，现在线上就在回滚点。查：`cat /var/log/cloudland-current-tag`，若是回滚点则用 `cd /root/cloudland && /bin/bash scripts/deploy.sh main` 带回最新
 - [ ] **阶段一收尾 B**：清理废弃 `:latest`（若还有）—— 🔴 **必须先点「管理」进入仓库，只删镜像版本列表里 `latest` 那一行，绝不点仓库列表的「删除」**。四个仓库已误删过，重建后可能已无 `latest`
 - [x] ~~阶段一收尾 C：重新积累回滚点~~ —— **已恢复**：ACR 现有 `5c4c5c7`（15:58）与 `0c94da1`（16:20）两个版本；16:20 那次 `current-tag` 与容器镜像双双指向 `0c94da1`，证明部署阶段也成功
-- [ ] **阶段一收尾（可选收官）**：用新 tag 再跑一次回滚做实收 —— `cd /root/pm-system && /bin/bash scripts/rollback.sh 5c4c5c7`，完事 `deploy.sh main` 带回最新
+- [x] ~~阶段一收尾：用新 tag 再跑一次回滚做实收~~ —— **已实测通过**（2026-09-15 16:38）
 - [x] **阶段二**：补上 CI（单元测试）—— 23 个纯单元测试 + 摘掉 `-DskipTests` + `@Disabled` 掉 `@SpringBootTest`（§6.2）
 - [x] ~~阶段二收尾：云端验证~~ —— **已通过**：构建日志 `Tests run: 24, Failures: 0, Skipped: 1`（§6.2）
 - [ ] **阶段二延伸（可选）**：推一个故意改坏逻辑的提交，在云端闭环验证"构建红 → 部署不执行"；或把 `@SpringBootTest` 用 Testcontainers/H2 救活
 - [ ] 后续写新功能时**同步补测试** —— 门禁的价值随覆盖度增长，不补就等于没加
 - [ ] **Cloudland 的阶段二**：它的 `src/test/` **一个测试都没有**，Dockerfile 也带 `-DskipTests`（门禁完全关闭）。要照搬这套：先摸它的业务代码找出纯逻辑，写测试，再摘掉 `-DskipTests`
-- [ ] **阶段三收尾**：故障路径待验证。**推荐零影响做法**：用一次性容器验证 `RestartCount` 会递增（§6.3）；完整的 `DB_URL` 端到端验收会短暂影响线上，择机
+- [ ] **阶段三收尾**：故障路径待验证 —— 用「提取真实函数 + 一次性容器」的方式，**零影响**（§6.3 给了完整命令，约 90 秒）。关键看输出里的 `restarts >= 1`
 - [ ] 记一笔：`.env` 不参与版本控制，**改过环境变量 schema 之后要重做一次回滚验收**（§6.1 隐性依赖）
 - [ ] 确认 Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段问题）
 - [x] ~~清理 `backend/Dockerfile` 第 27 行过时注释（写着"测试在 CI 跑"，实际没有）~~ —— 阶段二已顺手修掉，并把测试真的接上了
