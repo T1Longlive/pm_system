@@ -215,7 +215,9 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 
 ## 6. 补全计划
 
-### 阶段一：回滚能力 —— ✅ 已实现（2026-09-15 pm-system）
+### 阶段一：回滚能力 —— ✅ 机制已实现并验证（2026-09-15，两个项目）
+
+**状态**：tag 版本化**已验证生效**（见下方证据链）；回滚脚本已就位但**尚未执行过验收**。
 
 **目标**：能退回任意历史版本。
 
@@ -296,23 +298,63 @@ cd /root/pm-system && /bin/bash scripts/rollback.sh --show
 curl -I http://127.0.0.1:8081
 ```
 
-#### 首次上线必须盯的一件事
+#### 验证结果：✅ 机制已证实（2026-09-15 12:29）
 
-去看**构建阶段**的日志，确认 buildctl 打的 tag 真的被替换成了 40 位 SHA
-（而不是字面量 `${GITEE_COMMIT}` 或被清空）。
+**证据**：推送后 Gitee 流水线全绿，构建与部署两个阶段都通过。
+
+**但"绿"本身不是证据** —— 要看清为什么绿能证明 `${GITEE_COMMIT}` 生效。
+下面是一条**闭合的推理链**，每一环都由代码结构强制：
+
+| 环 | 事实（来自代码） | 若变量没生效会怎样 |
+|---|---|---|
+| ① | compose 的 image 是 `${IMAGE_TAG:?...}`，变量缺失时 compose 直接报错 | `IMAGE_TAG` 没传到 → compose 报错 → **流水线红** |
+| ② | `$DC pull backend frontend` 排在 `up -d` **之前**，失败即 `exit 1` | tag 在 ACR 上不存在 → pull 失败 → **流水线红** |
+| ③ | `docker compose pull` 与 `up` 不同 —— 它**必然访问远端**，不吃本地镜像缓存 | 本地有同名镜像也救不了，必须远端真的存在 |
+| ④ | 部署侧拉的是 `...pm-backend:$(git rev-parse HEAD)` | —— |
+| ⑤ | 该 tag 的镜像是构建阶段产的，而其 tag 字段是 `pm-backend:${GITEE_COMMIT}` | —— |
+
+**结论**：流水线绿 ⇒ ②③ 成立 ⇒ ACR 上确实存在以「本次推送的 commit SHA」命名的镜像
+⇒ 而它只能由构建阶段产出 ⇒ **`${GITEE_COMMIT}` 被替换成的正是该 commit SHA**。
+即构建侧的 `${GITEE_COMMIT}` 与部署侧的 `git rev-parse HEAD` **取值完全一致**，
+整条链路唯一的隐性契约成立。
+
+> ⚠️ **注意这个推论只在 pull-fail-fast 的设计下成立。**
+> 如果当初把 pull 写成 `|| true`、或让它排在 `up -d` 后面，
+> 那么 tag 错了也会"绿着部署成功"，这个证据链就断了。
+> —— 顺带说明为什么"让失败暴露"比"让失败被容忍"更值钱。
+
+**未收集到的证据**：部署日志里 `DIAG GITEE_COMMIT=` 一行的取值。
+它只影响 §7.10 那个并发竞态能否根治，**不影响正确性**：
 
 ```bash
-# 在 Gitee 流水线页面「云端构建镜像」阶段的日志里搜 -t 或 push=true
+# 想确认就起来看一下，有值且等于 Image tag 就可以按 §7.10 升级
+grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log | tail -1
 ```
 
-判定：
+#### 还没做的一步：回滚本身的验收
 
-| 看到什么 | 意味着 | 怎么办 |
-|---|---|---|
-| `-t .../pm-backend:<40位SHA>` 且部署成功 | 变量生效 ✅ | 照搬到 Cloudland，阶段一收工 |
-| 部署日志 `DIAG GITEE_COMMIT=` 那一行两个值相等 | 部署侧也能直读 commit，更好 | 可升级：见 §7.10 |
-| `pull` 报 `manifest unknown` / `not found` | tag 变量没生效 | 查 buildctl 实际 -t 参数（§7.5） |
-| tag 变成字面量 `${GITEE_COMMIT}` | 字段没被识别 | 同上；改用 `${GITEE_PIPELINE_BUILD_NUMBER}` 并加跨阶段传值 |
+**上面的验证只证明了「tag 版本化可用」，没有证明「回滚可用」。**
+`scripts/rollback.sh` 至今**从未被执行过**，它的正确性还是纸面推理。
+阶段一的验收标准是「能部署上一版镜像并确认服务正常」—— 这一条尚未满足。
+
+```bash
+# 1) 先看现状，顺便验证 --show 分支
+cd /root/pm-system && /bin/bash scripts/rollback.sh --show
+
+# 2) 制造一个已知的坏版本：改一行前端文案，push，等它上线，确认页面是坏的样子
+
+# 3) 回滚到上一条提交（用坏版本之前那个 SHA）
+/bin/bash scripts/rollback.sh <上一个SHA>
+
+# 4) 确认页面回到改坏之前
+curl -I http://127.0.0.1:8081
+```
+
+第 3 步应该依次看到：解析出完整 SHA → ACR 上有该镜像 → 提示当前 HEAD 与目标不同 → 要求输 `yes`
+→ `Rollback mode: checking out <sha>` → `Image tag` 等于目标 SHA → 健康检查通过。
+
+**特别注意**：回滚只能退到「tag 版本化之后」的提交。
+`faa9821` 是本项目第一个带 SHA tag 的提交，**它就是可回滚的最早边界**。
 
 ---
 
@@ -498,6 +540,12 @@ proxy_set_header Host $http_host;   # ✅ 含端口
 3. **外部服务的规则必须实测。** 二手文档会过时（本项目的工具链版本、凭证机制、命名空间规则全部与文档不符）。
 4. **`mvn compile` 通过 ≠ 应用能启动。** 配置类改动至少真正启动一次。
 5. **环境不对称最贵。** 同一个 bug 可能「容器里正常、本地崩」或反之 —— 只看一边查不出来。
+6. **让失败"吵"，不要让它"静" —— 这本身就是可验证性。**
+   这次只凭"流水线绿了"就能证明 `${GITEE_COMMIT}` 生效，唯一原因是
+   `pull` 排在 `up -d` 之前且失败即 `exit 1`（§6.1 证据链的 ②③ 环）。
+   若当初写成 `$DC pull ... || true`，tag 错了也会"静默部署成功"，
+   验证就只能靠人肉翻日志比对。
+   **设计每一步时都问一句：这一步坏了，我怎么知道？** 答不上来就说明它会静默失败。
 
 ### 7.10 🟡 并发 push 会让「构建 tag」与「部署 tag」错位
 
@@ -565,7 +613,8 @@ DIAG GITEE_COMMIT=<值或 <unset>> GITEE_BRANCH=... GITEE_PIPELINE_BUILD_NUMBER=
 | `docker-compose.yml` | backend/frontend 用 ACR 镜像；已有 `cloudland.sql` 挂载 |
 | `Dockerfile` | `maven:3.8.6-openjdk-8` → `openjdk:8-jre-slim` |
 | `vue/Dockerfile` | `node:16-alpine` → `nginx:alpine`，**COPY 带 `vue/` 前缀** |
-| `scripts/deploy.sh` | 同结构，另有 `ensure_host_nginx_stopped`（80 端口被宿主机 nginx 占用时停它） |
+| `scripts/deploy.sh` | 同结构（另有 `ensure_host_nginx_stopped`：80 端口被宿主机 nginx 占用时停它）+ `IMAGE_TAG` 解析 |
+| `scripts/rollback.sh` | **回滚**：同 pm-system，容器名/端口按 Cloudland 调整 |
 | `scripts/mirror-base-images.sh` | 基础镜像转存（含"已下线镜像复用本地"逻辑） |
 | `.gitattributes` / `.dockerignore` | 本次新增（此前缺失） |
 
@@ -646,10 +695,10 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 
 **优先级从高到低：**
 
-- [x] **阶段一（pm-system）**：镜像 tag 版本化 + 回滚能力（§6.1）—— 代码已就位，**待在服务器上跑一次验收**
-- [ ] **阶段一收尾**：Cloudland 照搬同一套改动（4 个文件 + 新增 rollback.sh）
-- [ ] 阶段一收尾：确认构建日志里 tag 真的被替换成 40 位 SHA；按判定表决定是否升级为 `GITEE_COMMIT` 优先（§7.10）
-- [ ] 阶段一收尾：在 ACR 控制台删掉 `pm-*:latest` / `cloudland-*:latest`，杜绝误用
+- [x] **阶段一**：镜像 tag 版本化 + 回滚能力 —— 两个项目代码已上线（pm-system `faa9821`、Cloudland `442178c`），**tag 机制已验证生效**（§6.1 证据链）
+- [ ] **阶段一收尾 A（重要）**：实际执行一次回滚验收 —— `rollback.sh` 至今未跑过，正确性仍是纸面推理（§6.1）
+- [ ] **阶段一收尾 B**：在 ACR 控制台删掉 `pm-*:latest` / `cloudland-*:latest`，杜绝误用
+- [ ] **阶段一收尾 C（可选）**：`grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log`，有值就可按 §7.10 升级消除并发竞态
 - [ ] **阶段二**：补纯单元测试，测试跑在 Dockerfile 里（§6.2）
 - [ ] **阶段三**：`deploy.sh` 健康检查补上后端（§6.3）—— 注意回滚脚本共用同一个健康检查，改一处覆盖两个场景
 - [ ] 确认 Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段问题）
