@@ -77,10 +77,19 @@ t1longlive/nginx:alpine
 
 ### 2.4 应用镜像
 
+**tag 规则：`<commit SHA>`（完整 40 位），不再用 `latest`。**
+
 ```
-t1longlive/pm-backend:latest          t1longlive/pm-frontend:latest
-t1longlive/cloudland-backend:latest   t1longlive/cloudland-frontend:latest
+t1longlive/pm-backend:<commit-sha>        t1longlive/pm-frontend:<commit-sha>
+t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-sha>
 ```
+
+- 构建侧（Gitee 云端 build@docker）：`tag: pm-backend:${GITEE_COMMIT}`
+- 部署侧（服务器 deploy.sh）：`IMAGE_TAG="$(git rev-parse HEAD)"` —— 同一提交产生的同一值
+- ⚠️ **`:latest` 已废弃、不会再被推送。** 它现在指向的是改造前那个旧镜像，
+  谁再去 `docker pull ...:latest` 都会拿到过时的东西。建议在 ACR 控制台把它删掉，
+  免得将来有人误用。
+- ⚠️ ACR 上的 tag 会随每次 push 累积。个人版实例有配额，定期在控制台清理旧 tag。
 
 ### 2.5 Gitee 主机组
 
@@ -103,17 +112,24 @@ t1longlive/cloudland-backend:latest   t1longlive/cloudland-frontend:latest
       ↓
 ② Gitee 云端流水线（build@docker / buildkit）
      ├─ 从 ACR 拉基础镜像
-     ├─ 构建 pm-backend / pm-frontend 镜像
+     ├─ 构建 pm-backend / pm-frontend 镜像，tag = ${GITEE_COMMIT}
      └─ 推送到 ACR
       ↓
 ③ 派发到阿里云主机（shell@agent + Gitee Go runner）
       ↓
 ④ 服务器执行 scripts/deploy.sh
      ├─ git reset --hard（同步代码）
+     ├─ IMAGE_TAG = git rev-parse HEAD   ← 与 ② 的 ${GITEE_COMMIT} 必须是同一个值
      ├─ docker compose pull（只拉镜像，不构建）
      └─ docker compose up -d
       ↓
 ⑤ 健康检查 → 用户浏览器访问
+```
+
+> **②的 tag 与 ④的 IMAGE_TAG 必须相等，这是整条链路唯一的隐性契约。**
+> 相等时一切正常；不相等时 `pull` 会失败并退出 —— **宁可报错，不部署错版本**。
+> 为什么会不相等？部署阶段的 `reset --hard origin/main` 取的是"此刻"的分支最新提交，
+> 若构建期间又有新 push，它就不是构建时的那个 commit 了（并发 push 竞态）。见 §7.10。
 ```
 
 ### 3.2 镜像流向（容易搞混，单列出来）
@@ -149,6 +165,9 @@ t1longlive/cloudland-backend:latest   t1longlive/cloudland-frontend:latest
 | 镜像在云端构建，服务器只 pull | 服务器仅 1.8G，本地编译会被 **OOM Killer 杀掉**（日志无报错直接中断） |
 | 基础镜像转存自己的 ACR | 云端连不上 Docker Hub；顺带固定基础镜像来源（供应链可控） |
 | `dependsOn` 做质量门禁 | 构建失败就不部署，**线上不受影响** |
+| **应用镜像 tag = commit SHA**（非 `latest`） | 镜像不可变 ⇒ 能回滚、能审计"线上跑的是哪次提交" |
+| **compose 用 `${IMAGE_TAG:?...}` 而非 `:-latest`** | 变量缺失时**直接报错**，杜绝"静默拉 latest"这类查不出来的错 |
+| **`pull` 失败即退出，排在 `up -d` 之前** | 拉不到镜像时线上完全没被碰过 —— 这是回滚能安全生效的前提 |
 
 ---
 
@@ -185,7 +204,7 @@ t1longlive/cloudland-backend:latest   t1longlive/cloudland-frontend:latest
 | 推送镜像仓库 | CD | ✅ |
 | 自动部署到生产 | CD | ✅ |
 | 健康检查 | CD | ⚠️ 只盯前端 |
-| 回滚 | CD | ❌ 没有 |
+| 回滚 | CD | ✅ **已具备**（镜像 tag = commit SHA，见 §6.1） |
 
 **当前形态是 Continuous Deployment（推到 main 直接上生产，无人为确认）。**
 
@@ -196,49 +215,104 @@ t1longlive/cloudland-backend:latest   t1longlive/cloudland-frontend:latest
 
 ## 6. 补全计划
 
-### 阶段一：回滚能力（**优先级最高**）
+### 阶段一：回滚能力 —— ✅ 已实现（2026-09-15 pm-system）
 
-**目标**：能一键退回任意历史版本。
+**目标**：能退回任意历史版本。
 
-**为什么优先**：现在线上出问题**没有退路**，只能改代码重新推。
-回滚能力是「能部署」与「可运维」的分界线。
+**为什么优先**：之前线上出问题**没有退路**，只能改代码重新推。
+回滚能力是「能部署」与「可运维」的分界线 —— 这一条已经跨过去了。
 
-#### 要做的事
+#### 实现方式
 
-1. **镜像 tag 版本化**（流水线里两个 `build@docker`）
-   ```yaml
-   tag: pm-backend:${GITEE_COMMIT}      # 用提交 SHA 作 tag
-   ```
-   > ⚠️ **动手前必须验证**：`${GITEE_COMMIT}` 是否为**完整 40 位 SHA**，
-   > 且与部署脚本里的 `git rev-parse HEAD` 一致。
-   > 若不一致（或该变量在 `shell@agent` 里不可用），改用
-   > `${GITEE_PIPELINE_BUILD_NUMBER}` 并把该值通过其它方式传给部署脚本。
-   > **不要凭猜测写入** —— 先看一次真实构建日志。
-   >
-   > 注意：`shell@agent` 里**不保证能读到 Gitee 系统参数**，
-   > 所以部署侧最可靠的做法是 `git rev-parse HEAD`。
+镜像 tag 从 `latest` 改成 **commit SHA**。`latest` 是"移动靶"，无法指认版本；
+SHA 是不可变的，天然具备回滚与审计能力。
 
-2. **compose 改为按变量取 tag**
-   ```yaml
-   image: crpi-.../t1longlive/pm-backend:${IMAGE_TAG:?IMAGE_TAG must be set}
-   ```
-   （`:?` 让变量缺失时直接报错，避免静默拉 `latest`）
+| 位置 | 改动 |
+|---|---|
+| `.workflow/流水线-202609111651.yml` | 两个 `build@docker` 的 `tag:` 改为 `pm-backend:${GITEE_COMMIT}` / `pm-frontend:${GITEE_COMMIT}` |
+| `docker-compose.yml` | 两个 `image:` 的 `:latest` 改为 `:${IMAGE_TAG:?IMAGE_TAG is not set - deploy via scripts/deploy.sh}` |
+| `scripts/deploy.sh` | 计算 `IMAGE_TAG`、诊断 `GITEE_COMMIT`、`pull` 失败显式报错退出、部署后记录当前 tag |
+| `scripts/rollback.sh` | **新增**，回滚入口 |
+| `.env.example` | 加警告：**不要**在里面定义 `IMAGE_TAG` |
 
-3. **deploy.sh 里计算并导出 tag**
-   ```bash
-   git reset --hard "origin/$BRANCH"
-   export IMAGE_TAG="$(git rev-parse HEAD)"
-   $DC pull backend frontend
-   ```
+#### 为什么用 `${GITEE_COMMIT}` 而不用 `${GITEE_PIPELINE_BUILD_NUMBER}`
 
-4. **回滚流程**（写进文档）
-   ```bash
-   # 方式 A：回退代码再部署（会重新构建一个旧版本的镜像）
-   git revert <bad-commit> && git push
-   # 方式 B：直接部署指定 tag（需先把 compose 的 tag 参数化到位）
-   ```
+| | `GITEE_COMMIT` | `GITEE_PIPELINE_BUILD_NUMBER` |
+|---|---|---|
+| 部署侧能否独立算出来 | ✅ `git rev-parse HEAD` | ❌ 流水线内部序号，服务器上无从得知 |
+| 跨阶段传递 | 不需要（两边各自算，值相同） | 必须显式传，而 shell@agent 未必读得到 Gitee 变量 |
 
-**验收标准**：能部署上一版镜像并确认服务正常。
+结论：**能用"同一事实两处独立推导"的地方，就别引入"跨阶段传值"**。
+后者多一个可能失效的环节。
+
+> **依据（非猜测）**：Gitee 官方《系统级变量》写明 `GITEE_COMMIT` = Push 的完整 commit
+> （另设 `GITEE_SHORT_COMMIT` 为 7 位），且"可在**任何任务**内使用"；
+> 《镜像构建》插件文档写明「镜像 Tag 支持引用流水线全局变量，示例 `app:v1.${GITEE_PIPELINE_BUILD_NUMBER}`」。
+
+#### 回滚怎么用
+
+```bash
+cd /root/pm-system
+/bin/bash scripts/rollback.sh --show            # 先看当前版本 + 最近 10 条提交
+/bin/bash scripts/rollback.sh <commit-sha>      # 回滚（交互确认）
+/bin/bash scripts/rollback.sh <commit-sha> --yes
+```
+
+`rollback.sh` 会依次做三件事，任一步失败都在**碰到线上之前**退出：
+
+1. 用 `git rev-parse --verify <sha>^{commit}` 把短 SHA 解析成完整 SHA
+2. 校验该提交的 `docker-compose.yml` 引用 `IMAGE_TAG` —— **拦掉改造前的提交**
+   （那些提交的 compose 写死 `:latest`，回滚过去会拉到错的镜像）
+3. `docker pull` 两个目标镜像，确认 ACR 上真的存在
+
+然后交给 `deploy.sh`：`git checkout --detach <sha>` + `IMAGE_TAG=<sha>` 重新部署。
+**代码与镜像退到同一个提交**，两者严格一致。
+
+#### 三条必须知道的边界
+
+1. **只能回滚到"阶段一改造之后"的提交。** 更早的提交没有 SHA tag 镜像，
+   脚本会拦下来。之前那些镜像就是不存在，这是客观事实。
+2. **回滚是临时止血，不是永久倒退。** 回滚后线上处于 detached HEAD，
+   下一次流水线部署会 `checkout main` + `reset --hard origin/main`，自动回到最新。
+   要永久倒退就用 `git revert <bad-commit> && git push`（方式 A）。
+3. **`pull` 失败 = 线上没被碰过。** 因为 `pull` 排在 `up -d` 之前且失败即退出，
+   拉不到镜像时旧容器照常运行。这是刻意的顺序设计，别调换。
+
+#### 验收标准（怎么证明它真的能用）
+
+```bash
+# 1) 正常部署一次，确认日志里 tag 是完整 SHA，且容器用的是它
+tail -50 /var/log/pm-system-deploy.log
+cat /var/log/pm-system-current-tag
+docker inspect -f '{{.Name}} -> {{.Config.Image}}' pm-backend pm-frontend
+
+# 2) 故意改坏前端一行文案并 push，等它上线
+
+# 3) 回滚到上一条提交
+cd /root/pm-system && /bin/bash scripts/rollback.sh --show
+/bin/bash scripts/rollback.sh <上一条提交的SHA>
+
+# 4) 确认页面回到改坏之前的样子
+curl -I http://127.0.0.1:8081
+```
+
+#### 首次上线必须盯的一件事
+
+去看**构建阶段**的日志，确认 buildctl 打的 tag 真的被替换成了 40 位 SHA
+（而不是字面量 `${GITEE_COMMIT}` 或被清空）。
+
+```bash
+# 在 Gitee 流水线页面「云端构建镜像」阶段的日志里搜 -t 或 push=true
+```
+
+判定：
+
+| 看到什么 | 意味着 | 怎么办 |
+|---|---|---|
+| `-t .../pm-backend:<40位SHA>` 且部署成功 | 变量生效 ✅ | 照搬到 Cloudland，阶段一收工 |
+| 部署日志 `DIAG GITEE_COMMIT=` 那一行两个值相等 | 部署侧也能直读 commit，更好 | 可升级：见 §7.10 |
+| `pull` 报 `manifest unknown` / `not found` | tag 变量没生效 | 查 buildctl 实际 -t 参数（§7.5） |
+| tag 变成字面量 `${GITEE_COMMIT}` | 字段没被识别 | 同上；改用 `${GITEE_PIPELINE_BUILD_NUMBER}` 并加跨阶段传值 |
 
 ---
 
@@ -328,6 +402,10 @@ Swap: 1.0Gi / 356Mi used
 
 **它会**：删掉全部注释、重排格式、把 stage `name` 改成中文、
 **并删除 `dependsOn`**（后果：构建失败也照常部署，质量门禁失效）。
+**还可能改掉 `tag:` 里的 `${GITEE_COMMIT}` 变量**（后果更隐蔽：镜像 tag 变成错的，
+但流水线照样"绿"，直到部署时 pull 失败才暴露）。
+
+> **阶段一的改动手写进了 YAML。改完之后千万不要用网页编辑器保存这个文件。**
 
 **应对**：
 > **改流水线优先改仓库 YAML 并 push。**
@@ -421,6 +499,44 @@ proxy_set_header Host $http_host;   # ✅ 含端口
 4. **`mvn compile` 通过 ≠ 应用能启动。** 配置类改动至少真正启动一次。
 5. **环境不对称最贵。** 同一个 bug 可能「容器里正常、本地崩」或反之 —— 只看一边查不出来。
 
+### 7.10 🟡 并发 push 会让「构建 tag」与「部署 tag」错位
+
+改成 SHA tag 之后**新引入**的失效模式，之前的 `latest` 时代不存在（因为两边都是"最新"）。
+
+**机制**：
+
+```
+T0  push C1  → 流水线开始构建 tag=C1
+T1  push C2  → origin/main 立刻变成 C2
+T2  流水线部署阶段 git reset --hard origin/main  →  HEAD=C2
+                IMAGE_TAG=C2，但 ACR 上可能还没有 C2 的镜像
+                → pull 失败 → 流水线红，线上不受影响
+```
+
+**危害可控**：表现是**部署失败**，不是**部署错版本**。旧版本继续跑，不会出现
+"代码是 C2、镜像却是 C1"的静默不一致 —— 因为 compose 拿不到 tag 就根本不启动。
+
+**当前对策**：接受它。失败信息已经写得很明确（deploy.sh 里三条常见原因的提示）。
+
+**根治办法（待实测后启用）**：部署阶段直接用 Gitee 注入的 `GITEE_COMMIT`，
+而不是 `git rev-parse HEAD`，就彻底不受 origin/main 移动影响。
+
+`deploy.sh` 里已经放了一行诊断来收集证据：
+
+```
+DIAG GITEE_COMMIT=<值或 <unset>> GITEE_BRANCH=... GITEE_PIPELINE_BUILD_NUMBER=...
+```
+
+- 若显示 `<unset>` ⇒ shell@agent 里拿不到 Gitee 变量，保持现状。
+- 若显示完整 SHA 且等于 Image tag ⇒ **可以升级**：
+  把 `IMAGE_TAG` 的来源优先级改成 `GITEE_COMMIT` 优先，`git rev-parse HEAD` 兜底，
+  并同步 `git checkout --detach "$GITEE_COMMIT"`，让代码也锚定到构建时那个提交。
+  改完删掉诊断行。
+
+> Gitee 官方文档说 `GITEE_*`「可在任何任务内使用」，但 `shell@agent` 是
+> **分布式调度到自建主机**的执行方式，与云端容器步骤环境不同 —— 按 §7.9.3
+> 「外部服务的规则必须实测」，以日志实际输出为准。
+
 ---
 
 ## 8. 关键文件索引
@@ -429,14 +545,15 @@ proxy_set_header Host $http_host;   # ✅ 含端口
 
 | 文件 | 作用 |
 |---|---|
-| `.workflow/流水线-202609111651.yml` | 流水线：`build@docker`×2 + `shell@agent` 部署，`dependsOn` 门禁 |
-| `docker-compose.yml` | 4 服务；backend/frontend 用 ACR 镜像；mysql 挂了 `init.sql` |
+| `.workflow/流水线-202609111651.yml` | 流水线：`build@docker`×2（tag=`${GITEE_COMMIT}`）+ `shell@agent` 部署，`dependsOn` 门禁 |
+| `docker-compose.yml` | 4 服务；backend/frontend 用 ACR 镜像 + `${IMAGE_TAG:?}`；mysql 挂了 `init.sql` |
 | `backend/Dockerfile` | 多阶段：`maven:3.9-eclipse-temurin-17` → `eclipse-temurin:17-jre`，FROM 均为 ACR |
 | `frontend/Dockerfile` | `node:20-alpine` → `nginx:alpine`，COPY 路径带 `frontend/` 前缀 |
 | `frontend/nginx.conf` | 静态托管 + `/api` 反代，**`$http_host`** |
-| `scripts/deploy.sh` | 服务器部署：flock、`pull`、`up -d`、健康检查 |
+| `scripts/deploy.sh` | 服务器部署：flock、解析 `IMAGE_TAG`、`pull`、`up -d`、健康检查、记录当前 tag |
+| `scripts/rollback.sh` | **回滚**：解析 SHA → 校验目标提交可用 → 预拉镜像 → 交给 deploy.sh |
 | `scripts/mirror-base-images.sh` | 基础镜像转存 ACR |
-| `.env.example` | 环境变量模板（13 项） |
+| `.env.example` | 环境变量模板（13 项 + `IMAGE_TAG` 禁令说明） |
 | `.gitattributes` | `eol=lf` |
 | `docs/部署改造完整指南.md` | 从零改造的完整教程（含 9 条坑） |
 
@@ -471,9 +588,29 @@ cd /root/cloudland  && docker compose ps
 ### 验证「镜像确实来自 ACR」
 
 ```bash
-docker inspect pm-backend        --format '{{.Config.Image}}'
-docker inspect cloudland-backend --format '{{.Config.Image}}'
-# 应显示 crpi-.../t1longlive/xxx:latest
+docker inspect pm-backend        --format '{{.Name}} -> {{.Config.Image}}'
+docker inspect cloudland-backend --format '{{.Name}} -> {{.Config.Image}}'
+# 应显示 crpi-.../t1longlive/xxx:<40位commit-sha>   ← 不再是 latest
+```
+
+### 回滚
+
+```bash
+cd /root/pm-system
+/bin/bash scripts/rollback.sh --show           # 看当前版本 + 最近 10 条提交
+/bin/bash scripts/rollback.sh <commit-sha>     # 回滚（--yes 跳过确认）
+```
+
+```bash
+# 被 IMAGE_TAG 挡住时（手工敲 docker compose 命令）
+cd /root/pm-system && IMAGE_TAG=$(git rev-parse HEAD) docker compose ps
+```
+
+### 查"线上到底是哪次提交"
+
+```bash
+cat /var/log/pm-system-current-tag             # deploy.sh 部署成功后写入
+docker inspect -f '{{.Config.Image}}' pm-backend
 ```
 
 ### 排错三板斧（区分应用问题与网络问题）
@@ -509,9 +646,12 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 
 **优先级从高到低：**
 
-- [ ] **阶段一**：镜像 tag 版本化 + 回滚能力（§6.1）
+- [x] **阶段一（pm-system）**：镜像 tag 版本化 + 回滚能力（§6.1）—— 代码已就位，**待在服务器上跑一次验收**
+- [ ] **阶段一收尾**：Cloudland 照搬同一套改动（4 个文件 + 新增 rollback.sh）
+- [ ] 阶段一收尾：确认构建日志里 tag 真的被替换成 40 位 SHA；按判定表决定是否升级为 `GITEE_COMMIT` 优先（§7.10）
+- [ ] 阶段一收尾：在 ACR 控制台删掉 `pm-*:latest` / `cloudland-*:latest`，杜绝误用
 - [ ] **阶段二**：补纯单元测试，测试跑在 Dockerfile 里（§6.2）
-- [ ] **阶段三**：`deploy.sh` 健康检查补上后端（§6.3）
+- [ ] **阶段三**：`deploy.sh` 健康检查补上后端（§6.3）—— 注意回滚脚本共用同一个健康检查，改一处覆盖两个场景
 - [ ] 确认 Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段问题）
 - [ ] 清理 `backend/Dockerfile` 第 27 行过时注释（写着"测试在 CI 跑"，实际没有）
 - [ ] 按需：JVM 堆上限 / 加 swap / 升级 ECS 到 4G（§6.4）

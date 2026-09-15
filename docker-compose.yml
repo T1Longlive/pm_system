@@ -4,6 +4,12 @@
 # 对外只暴露前端 8081（Cloudland 已占用 80）。
 # 后端 8080 / MySQL 3306 / Redis 6379 一律不做宿主机端口映射，
 # 仅在 compose 内部网络可达 —— 这是生产环境的基本原则。
+#
+# ⚠️ 应用镜像按 IMAGE_TAG 取 tag（值 = commit SHA），不再是 latest。
+#    正常部署走 scripts/deploy.sh（它负责计算并导出 IMAGE_TAG）。
+#    手工排查时也必须带上，否则本文件会直接报错：
+#        cd /root/pm-system
+#        IMAGE_TAG=$(git rev-parse HEAD) docker compose ps
 # ======================================================================
 
 services:
@@ -12,7 +18,13 @@ services:
     # （见 .workflow/流水线-*.yml 里的 build@docker 步骤）
     # 服务器只 pull + up，不再本地编译 —— 这是方案 B 的核心。
     # ⚠️ 地址中的 t1longlive 是 Gitee 个人空间地址，Gitee Go 会用它作 ACR 命名空间
-    image: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/pm-backend:latest
+    #
+    # tag 不再写死 latest，而是按 IMAGE_TAG 取（= commit SHA）。
+    # IMAGE_TAG 由 scripts/deploy.sh 计算并 export，绝不在 .env 里定义。
+    # 用 `:?` 而非 `:-` 是刻意的：变量缺失时直接报错退出，
+    # 避免"静默拉取 latest"这种查不出来的错。
+    # （报错文案保持纯 ASCII，避免服务器 locale 不完整时输出乱码。）
+    image: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/pm-backend:${IMAGE_TAG:?IMAGE_TAG is not set - deploy via scripts/deploy.sh}
     container_name: pm-backend
     env_file:
       - .env
@@ -38,8 +50,8 @@ services:
     # 不映射端口：只允许 compose 网络内的 frontend 访问
 
   frontend:
-    # 同上：镜像来自云端构建产物
-    image: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/pm-frontend:latest
+    # 同上：镜像来自云端构建产物；tag 由 IMAGE_TAG 决定（见文件头说明）
+    image: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/pm-frontend:${IMAGE_TAG:?IMAGE_TAG is not set - deploy via scripts/deploy.sh}
     container_name: pm-frontend
     ports:
       # 对外唯一入口。改这里即可调整对外端口。

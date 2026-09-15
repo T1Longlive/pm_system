@@ -8,6 +8,12 @@ stages:
   trigger: auto
   executor: []
   steps:
+  # ⚠️ 镜像 tag = 本次 push 的完整 commit SHA（GITEE_COMMIT），不再是 latest。
+  #    依据：Gitee 官方《系统级变量》——GITEE_COMMIT 为完整 commit，
+  #    且 build@docker 的「镜像 Tag」字段官方说明支持引用流水线全局变量。
+  #    部署侧 scripts/deploy.sh 用 `git rev-parse HEAD` 取同一值，两者必须一致。
+  # ⚠️ 不要再用网页可视化编辑器保存本文件：编辑器会删注释、删 dependsOn，
+  #    也可能改掉 tag 里的变量。要改就改仓库 YAML 再 push。
   - step: build@docker
     name: build_backend_image
     displayName: 构建后端镜像
@@ -15,7 +21,7 @@ stages:
     repository: "{{CERTIFICATION.18140213287.server}}"
     username: "{{CERTIFICATION.18140213287.username}}"
     password: "{{CERTIFICATION.18140213287.password}}"
-    tag: pm-backend:latest
+    tag: pm-backend:${GITEE_COMMIT}
     dockerfile: ./backend/Dockerfile
     isCache: false
     processorType:
@@ -29,7 +35,7 @@ stages:
     repository: "{{CERTIFICATION.18140213287.server}}"
     username: "{{CERTIFICATION.18140213287.username}}"
     password: "{{CERTIFICATION.18140213287.password}}"
-    tag: pm-frontend:latest
+    tag: pm-frontend:${GITEE_COMMIT}
     dockerfile: ./frontend/Dockerfile
     isCache: false
     processorType:
@@ -72,6 +78,8 @@ stages:
       git checkout "$BRANCH"
       git reset --hard "origin/$BRANCH"
 
+      # 镜像 tag 由 scripts/deploy.sh 计算（= git rev-parse HEAD），
+      # 与构建阶段的 ${GITEE_COMMIT} 对应。此处不传 tag，保持单一真相来源。
       /bin/bash scripts/deploy.sh "$BRANCH"
     gitClone: "false"
     hostGroupID:
