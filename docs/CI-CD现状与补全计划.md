@@ -104,9 +104,32 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 
   这个检查顺带让你看到 ACR 上累积了多少 SHA tag（见下一条）。
 
-  **要删的话，控制台最快**：4 个仓库各选 `latest` → 删除，约 3 分钟。
+  **要删的话，务必走对路径 —— 这里踩过一次事故（2026-09-15）**：
+
+  > 🔴 **必须先点右侧的「管理」进入仓库，再在「镜像版本」列表里只勾 `latest` 那一行删除。**
+  > **绝对不要点仓库列表右侧的「删除」** —— 那是删**整个仓库**，
+  > 仓库内**所有 SHA tag 一并消失**，而 **ACR 没有回收站，删了不可恢复**。
+  >
+  > 实际后果：四个应用仓库被整个删掉，`faa9821` / `393f8bd` / `442178c` / `87c63f7`
+  > 等全部历史镜像丢失，**回滚能力一度归零**。
+  >
+  > 教训：**"清理一个 tag"和"删除一个仓库"在同一个页面上只差一次点击。**
+  > 涉及删除时的指令必须写清"点到哪一层"，而不是"去控制台删掉"。
+
   理论上也能用 Registry v2 API（`DELETE /v2/<name>/manifests/<digest>`）脚本化，
-  但要先取 digest、处理鉴权，为 4 个 tag 不值得。
+  但要先取 digest、处理鉴权，为 4 个 tag 不值得 —— 也正因为 API 不好用才更容易误点。
+
+  **如果误删了，唯一可能的补救**：服务器本地可能还留着带历史 tag 的镜像，
+  `docker push` 回 ACR 即可重建（push 会自动创建仓库）：
+
+  ```bash
+  docker images --format '{{.Repository}}:{{.Tag}}' \
+    | grep '^crpi-.*/t1longlive/' | grep -v '<none>' | sort
+  # 找到的逐个推回
+  docker push crpi-.../t1longlive/pm-backend:<sha>
+  ```
+
+  本地镜像一旦被 `docker image prune` 清掉，就**彻底找不回来了**。
 - ⚠️ ACR 上的 tag 会随每次 push 累积。个人版实例有配额，定期在控制台清理旧 tag。
 
 ### 2.5 Gitee 主机组
