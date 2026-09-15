@@ -30,8 +30,17 @@ RUN mvn -s ./settings.xml -B dependency:go-offline
 # 再拷源码（源码变动只让最后一层失效，依赖层仍命中缓存）
 COPY backend/src ./src
 
-# 编译打包，跳过测试（测试在 CI 的独立 job 里跑，见 .workflow 流水线）
-RUN mvn -s ./settings.xml -B clean package -DskipTests
+# 编译打包并**运行单元测试**：
+#   测试失败 → 本层失败 → 镜像构建失败 → 部署被流水线的 dependsOn 挡住。
+#   也就是说"测试门禁"直接复用已有的构建门禁，不需要新增流水线步骤。
+#   （原命令带 -DskipTests，注释还写着"测试在 CI 的独立 job 里跑" —— 那个 job 从来不存在。）
+#
+# 🔴 前提：测试必须**不依赖 Spring 上下文 / 真实 MySQL / Redis**，
+#    否则云端构建机会失败。当前测试集合：
+#      · RequirementStageServiceImplTest —— 需求阶段派生（纯函数，核心业务规则）
+#      · JwtUtilTest                     —— JWT 签发/校验/防篡改（安全性质）
+#    原来的 PmApplicationTests 要真实数据库，已 @Disabled（见类注释）。
+RUN mvn -s ./settings.xml -B clean package
 
 # ---------- 阶段 2：运行 ----------
 FROM crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/eclipse-temurin:17-jre AS runtime

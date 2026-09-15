@@ -243,7 +243,7 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 |---|---|---|---|---|
 | 提交触发流水线 | CI | ✅ | ✅ | |
 | 自动构建 | CI | ✅ | ✅ | |
-| **自动测试** | **CI 核心** | ❌ | ❌ **仍是最大窟窿** | 阶段二未开始 |
+| **自动测试** | **CI 核心** | ❌ | ✅ **已具备** | 23 个纯单元测试跑在 Dockerfile 里（§6.2） |
 | 产出镜像 | CI | ✅ | ✅ | tag 已改为 commit SHA |
 | 推送镜像仓库 | CD | ✅ | ✅ | ⚠️ 仓库被误删过，见 §6.1 |
 | 自动部署到生产 | CD | ✅ | ✅ | 加了「过期即跳过」防竞态（§7.10） |
@@ -257,14 +257,28 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 | 阶段 | 内容 | 进度 | 状态 |
 |---|---|---|---|
 | **阶段一** | 回滚能力（镜像 tag 版本化） | **~95%** | 机制已验证通过；待 ACR 重建 + 收尾 |
-| **阶段二** | 补上 CI（单元测试） | **0%** | **未开始 —— 当前最大的窟窿** |
+| **阶段二** | 补上 CI（单元测试） | **100%** | 已实现并本地验证（24 用例 / 改坏逻辑 → 9 失败 + 构建失败）；**待云端验证** |
 | 阶段三 | 健康检查补上后端 | **100%** | 已实现；逻辑层用模拟时钟验证过；**待服务器验收** |
 | 阶段四 | 内存与稳定性 | 0% | 可选，按需 |
 
-### 5.3 核心问题（没变）
+### 5.3 核心问题：原问题已解决，但边界要说清
 
-**CI 只验证「能编译」，不验证「功能正确」。**
-一个逻辑写错但能编译的提交，**照样全绿上线**。
+**原问题**：「CI 只验证『能编译』，不验证『功能正确』。一个逻辑写错但能编译的提交，照样全绿上线。」
+
+**现状**：已解决 —— 纯单元测试跑在镜像构建里，测试失败即构建失败即部署被挡。
+本地已证明：改坏一处判据 → 9 个用例失败 + BUILD FAILURE。
+
+**但别高估它**：
+
+| 它能拦 | 它拦不住 |
+|---|---|
+| 被测试覆盖到的纯逻辑被改错 | 没写测试的分支（**覆盖上限 = 测试质量上限**） |
+| 安全性质被破坏（JWT 校验被绕过之类） | 跨模块/跨服务/真实数据库行为 |
+| —— | 前端行为、样式、交互 |
+| —— | 写的断言本身就是错的 |
+
+**结论**：门禁从"能编译"提升到"核心规则没被改坏"。
+再往上要的是集成测试与端到端测试，那是另一个量级的投入。
 
 ### 5.4 零散技术债
 
@@ -498,32 +512,91 @@ git diff faa9821 393f8bd -- .env.example docker-compose.yml
 
 ---
 
-### 阶段二：补上 CI（单元测试）
+### 阶段二：补上 CI（单元测试）—— ✅ 已实现并本地验证（2026-09-15），待云端验证
 
 **目标**：让流水线能拦住「功能错误的提交」。
 
-#### 要做的事
+#### 核心思路：让测试门禁直接复用已有的构建门禁
 
-1. **写不依赖 Spring 上下文的纯单元测试**
-   - 现状：唯一的 `PmApplicationTests` 是 `@SpringBootTest`，**要连真实 MySQL**，
-     云端跑不了 → 这正是当初被迫加 `-DskipTests` 的原因
-   - 目标：针对 Service 层纯逻辑、工具类、日期计算等写纯 JUnit 测试
+```
+测试失败 → Dockerfile 里的 mvn package 失败 → 镜像构建失败
+        → 部署被流水的 dependsOn 挡住 → 线上不受影响
+```
 
-2. **把测试放进流水线**（**推荐做法：在 Dockerfile 里跑**）
-   ```dockerfile
-   # 原：RUN mvn -s ./settings.xml -B clean package -DskipTests
-   # 改：RUN mvn -s ./settings.xml -B clean package
-   ```
-   **优点**：不用新增流水线步骤；**测试失败 → 镜像构建失败 → 部署被 `dependsOn` 挡住** ✓
+**不需要新增任何流水线步骤** —— 阶段一建立的 `dependsOn` 门禁继续用。
+代价是「测试失败」会表现为「镜像构建失败」，报错位置在构建阶段而非独立 job
+（要更早更清楚的报错，才考虑加回 `build@maven` 步骤单独跑 `mvn test`）。
 
-   > ⚠️ 同时要把 `@SpringBootTest` 那个测试改用 `@Disabled` 或 profile 隔离，
-   > 否则它仍会拖垮构建。
+#### 做了三件事
 
-3. **（可选）恢复独立的测试门禁**
-   若希望「测试失败比镜像构建失败报得更早更清楚」，可加回 `build@maven` 步骤
-   只跑 `mvn test`（不打包）。代价是云端构建时间变长。
+**1. 补上真正能跑在云端的纯单元测试**
+
+| 测试类 | 覆盖 | 用例数 |
+|---|---|---|
+| `RequirementStageServiceImplTest` | **需求阶段派生**（`deriveStage`）—— 系统的核心业务规则：排期数据 + 日期 = 唯一真相源 | 17 |
+| `JwtUtilTest` | JWT 签发/校验/**防篡改/防伪造/过期** —— 安全性质 | 6 |
+| `PmApplicationTests` | 上下文冒烟 —— **`@Disabled`**（要真实 MySQL，云跑不了） | 1（跳过） |
+
+这两个类都**不启动 Spring 上下文、不连数据库**：
+- `deriveStage` 是无副作用纯函数，五个注入依赖在它里面完全用不到 → 构造时给 `mock()` 即可
+- `JwtUtil` 的构造器只是普通参数（Spring 用 `@Value` 注入，但测试里直接 `new` 就行）
+
+**2. 处理掉那个卡住门禁的 `@SpringBootTest`**
+
+`PmApplicationTests` 加 `@Disabled` 并写清原因与替代做法。
+**它才是当初被迫加 `-DskipTests` 的根源** —— 不处理它，摘掉 `-DskipTests` 就必然构建失败。
+
+想让它也能上云，需要 Testcontainers 或 H2 内存库 + 测试建表脚本 ——
+那是一件事，不是顺手能做的，等真需要端到端冒烟时再单独做。
+
+**3. 摘掉 `-DskipTests`，并修掉那句过时注释**
+
+```dockerfile
+# 改前：RUN mvn -s ./settings.xml -B clean package -DskipTests
+#       注释写着"测试在 CI 的独立 job 里跑"—— 那个 job 从来不存在
+# 改后：RUN mvn -s ./settings.xml -B clean package
+```
+
+#### 验收：本地已跑通，且证明门禁真的能拦错
+
+**① 正常状态**：`mvn -B clean test` → **24 个测试，0 失败，1 跳过，BUILD SUCCESS**（17.9 秒）
+
+**② 故意改坏业务逻辑**：把 `deriveStage` 里的一处判据从
+
+```java
+g.getTotal().compareTo(g.getPlannedEffort()) < 0    // 排满判据
+```
+
+改成 `<= 0`（一个字符的改动），重跑：
+
+```
+[ERROR] Tests run: 24, Failures: 9, Errors: 0, Skipped: 1
+[ERROR] BUILD FAILURE
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.1.2:test
+```
+
+**9 个用例失败、构建失败。** 其中 `totalEqualsPlannedIsFull` 精确地抓住了它 ——
+这正是**特意为这个边界写的那条用例**（`<` 与 `<=` 的差别）。
+这就是阶段二要的效果：**能编译但逻辑写错的提交，现在上不了线。**
+
+**③ 还原**：改回 `< 0`，重跑 → 24 个测试全绿，`git diff backend/src/main` 无残留。
+
+#### 云端验收（还没做）
+
+推一次，然后到 Gitee 流水线页面确认：
+
+- 「构建后端镜像」阶段日志里能看到 **`T E S T S`** 与 `Tests run: 24`；
+- 想验证门禁真的生效，就**推一个故意改坏逻辑的提交** → 构建阶段红 → 部署阶段未执行 → 线上不动。
 
 **验收标准**：故意改坏一个业务逻辑 → 流水线红了 → 线上未受影响。
+
+#### 这个方案保护不了什么（说清楚边界）
+
+- 测试是**开发自己写的**。写漏的分支、写错的断言，门禁一样放行。
+  测试的价值上限 = 测试的质量上限。
+- 只覆盖**纯逻辑**。跨模块、跨服务、真实数据库行为、前端行为都不在其中。
+- 云端构建时间会变长（多跑一遍测试，约十几秒），可接受。
+
 
 ---
 
@@ -848,7 +921,10 @@ ACR 被清空后，第 1 次 push 只产生唯一版本，**第 2 次 push 才�
 |---|---|
 | `.workflow/流水线-202609111651.yml` | 流水线：`build@docker`×2（tag=`${GITEE_COMMIT}`）+ `shell@agent` 部署，`dependsOn` 门禁 |
 | `docker-compose.yml` | 4 服务；backend/frontend 用 ACR 镜像 + `${IMAGE_TAG:?}`；mysql 挂了 `init.sql` |
-| `backend/Dockerfile` | 多阶段：`maven:3.9-eclipse-temurin-17` → `eclipse-temurin:17-jre`，FROM 均为 ACR |
+| `backend/Dockerfile` | 多阶段：`maven:3.9-eclipse-temurin-17` → `eclipse-temurin:17-jre`，FROM 均为 ACR；**`mvn clean package` 不带 `-DskipTests`**（测试即门禁） |
+| `backend/src/test/.../RequirementStageServiceImplTest.java` | **需求阶段派生纯单测**（17 用例）—— 核心业务规则 |
+| `backend/src/test/.../JwtUtilTest.java` | **JWT 安全性质单测**（6 用例）—— 防篡改/防伪造/过期 |
+| `backend/src/test/.../PmApplicationTests.java` | 上下文冒烟，**`@Disabled`**（要真实 MySQL） |
 | `frontend/Dockerfile` | `node:20-alpine` → `nginx:alpine`，COPY 路径带 `frontend/` 前缀 |
 | `frontend/nginx.conf` | 静态托管 + `/api` 反代，**`$http_host`** |
 | `scripts/deploy.sh` | 服务器部署：flock、解析 `IMAGE_TAG`、`pull`、`up -d`、健康检查、记录当前 tag |
@@ -954,12 +1030,14 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 - [ ] **阶段一收尾 C**：**重新积累回滚点** —— 每次 push 产生一个 SHA tag，**再推 2 次**才能重新具备"可回滚"能力（§7.11）
 - [ ] **阶段一收尾 D**：确认下一次构建能正常推送 —— ACR 仓库被删过，若构建阶段报"仓库不存在"，先在控制台建 4 个同名**空**仓库
 - [ ] **阶段一收尾 E**：`grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log` —— 已实测有值并据此改掉竞态（§7.10），这行现为常驻审计线索
-- [ ] **阶段二**：补纯单元测试，测试跑在 Dockerfile 里（§6.2）
-- [x] **阶段三**：`deploy.sh` 健康检查补上后端 —— 已实现（两项目 + 回滚脚本共用同一函数），逻辑层已验证（§6.3）
+- [x] **阶段二**：补上 CI（单元测试）—— 23 个纯单元测试 + 摘掉 `-DskipTests` + `@Disabled` 掉 `@SpringBootTest`（§6.2）
+- [ ] **阶段二收尾**：云端验证 —— 推一次，确认构建阶段日志里有 `Tests run: 24`；再推一个故意改坏逻辑的提交，确认构建红、部署未执行、线上不动
+- [ ] **阶段二延伸（可选）**：`@SpringBootTest` 用 Testcontainers/H2 救活，让它也能上云；或加回 `build@maven` 独立测试 job 让报错更早更清楚
+- [ ] 后续写新功能时**同步补测试** —— 门禁的价值随覆盖度增长，不补就等于没加
 - [ ] **阶段三收尾**：服务器上做一次验收 —— 改坏 `DB_URL` → 部署应报失败并打印日志。⚠️ 失败发生在 `up -d` 之后，**会短暂影响线上**，选低峰时段（§6.3）
 - [ ] 记一笔：`.env` 不参与版本控制，**改过环境变量 schema 之后要重做一次回滚验收**（§6.1 隐性依赖）
 - [ ] 确认 Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段问题）
-- [ ] 清理 `backend/Dockerfile` 第 27 行过时注释（写着"测试在 CI 跑"，实际没有）
+- [x] ~~清理 `backend/Dockerfile` 第 27 行过时注释（写着"测试在 CI 跑"，实际没有）~~ —— 阶段二已顺手修掉，并把测试真的接上了
 - [ ] 按需：JVM 堆上限 / 加 swap / 升级 ECS 到 4G（§6.4）
 - [ ] 上线后立即修改初始管理员密码（`admin` / `Pm@123456` 是公开的）
 - [ ] Cloudland 首页标语统一：`HomeView.vue` 第 13 行英文版、`LoginForm.vue` 第 10/45 行仍是旧文案
