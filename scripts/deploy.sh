@@ -72,10 +72,30 @@ git fetch origin "$BRANCH"
 
 if [ -n "$TARGET_COMMIT" ]; then
   # 回滚模式：代码与镜像一起退到同一个 commit，保证两者严格一致。
+  # 这是有意"倒退"，所以不参与下面的"过期构建"判断。
   # 下次流水线部署会 checkout main + reset --hard origin/main，自动回到最新。
   log "Rollback mode: checking out $TARGET_COMMIT"
   git checkout --detach "$TARGET_COMMIT"
 else
+  # 正常模式：先判断「本次构建是不是已经过期」。
+  #
+  # GITEE_COMMIT 是流水线注入的、本次构建所对应的提交（已实测在 shell@agent 里可读）。
+  # 若它已不等于分支最新，说明构建期间又有新 push 进来 —— 本次**跳过部署**，
+  # 交给那条更新的流水线去上线。
+  #
+  # 为什么不"照旧部署"、也不"强制部署旧提交"：
+  #   · 照旧部署（reset --hard origin/BRANCH）会拿到新代码、却去拉旧提交的镜像
+  #     → pull 报 manifest unknown，白跑一次（吵，但至少安全）
+  #   · 强制锚定 GITEE_COMMIT 部署旧提交 → 可能在新版本之后才落地，
+  #     把线上**顺序倒退**成旧版本（静默，且危险）
+  #   · 跳过则两种坏结果都不会发生：线上不动，更新的那条流水线负责上线
+  if [ -n "${GITEE_COMMIT:-}" ] && [ "$GITEE_COMMIT" != "$(git rev-parse "origin/$BRANCH")" ]; then
+    log "Skipping deploy: built commit ${GITEE_COMMIT} is no longer the tip of ${BRANCH}"
+    log "  分支最新已是 $(git rev-parse "origin/$BRANCH")，说明构建期间又有 push。"
+    log "  本次不动线上 —— 那条更新的流水线会负责部署最新版本。"
+    exit 0
+  fi
+
   git checkout "$BRANCH"
   git reset --hard "origin/$BRANCH"
 fi
@@ -98,16 +118,12 @@ if [ -n "$TARGET_COMMIT" ]; then
   log "HEAD subject   : $(git log -1 --format=%s HEAD)"
 fi
 
-# ---------- 诊断：Gitee 系统变量在 shell@agent 里是否可用 ----------
-# 【阶段一验证专用，验证完可以删掉这两行】
-# Gitee 官方文档称 GITEE_* 变量「可在任何任务内使用」，但 shell@agent 是
-# 分布式调度到本机的，是否真的注入需要实测。若这里 GITEE_COMMIT 有值且
-# 等于 Image tag，说明部署侧能直接拿到本次构建的 commit，
-# 后续可据此彻底消除「并发 push 导致 tag 错位」的竞态。
+# ---------- 审计记录：本次部署来自哪条流水线 / 哪个提交 ----------
+# 已实测（2026-09-15）：GITEE_COMMIT / GITEE_BRANCH / GITEE_PIPELINE_BUILD_NUMBER
+# 在 shell@agent 里**都能读到**（此前文档里"不保证能读到"的判断是错的）。
+# 这行保留下来当审计线索：出问题时能直接对上是"哪次构建"把它推上线的。
+# 手工执行（回滚、手动部署）时必然为空，显示 <unset>，属正常。
 log "DIAG GITEE_COMMIT=${GITEE_COMMIT:-<unset>} GITEE_BRANCH=${GITEE_BRANCH:-<unset>} GITEE_PIPELINE_BUILD_NUMBER=${GITEE_PIPELINE_BUILD_NUMBER:-<unset>}"
-if [ -n "${GITEE_COMMIT:-}" ] && [ "$GITEE_COMMIT" != "$IMAGE_TAG" ]; then
-  log "WARN: GITEE_COMMIT 与 HEAD 不一致（大概率是并发 push）。本次仍按 HEAD 部署。"
-fi
 
 # ---------- 登录检查 ----------
 # 私有仓库需要先登录。若没登录，pull 会失败并报 Authentication 相关错误，

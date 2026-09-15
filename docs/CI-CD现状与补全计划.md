@@ -324,12 +324,13 @@ curl -I http://127.0.0.1:8081
 > 那么 tag 错了也会"绿着部署成功"，这个证据链就断了。
 > —— 顺带说明为什么"让失败暴露"比"让失败被容忍"更值钱。
 
-**未收集到的证据**：部署日志里 `DIAG GITEE_COMMIT=` 一行的取值。
-它只影响 §7.10 那个并发竞态能否根治，**不影响正确性**：
+**DIAG 证据已收集（2026-09-15）**：`GITEE_COMMIT` 在 `shell@agent` 里**可读**，
+且等于当次部署的 tag。据此已把并发 push 竞态改为「过期即跳过」策略
+（**不是**简单地改用 `GITEE_COMMIT` 锚定 —— 那会导致顺序倒退）。详见 §7.10。
 
 ```bash
-# 想确认就起来看一下，有值且等于 Image tag 就可以按 §7.10 升级
-grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log | tail -1
+# 随时可复查：这行现在也兼作审计线索（哪次构建把版本推上线的）
+grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log | tail -3
 ```
 
 #### 回滚验收：✅ 已通过（2026-09-15 14:34，pm-system）
@@ -589,43 +590,70 @@ proxy_set_header Host $http_host;   # ✅ 含端口
    验证就只能靠人肉翻日志比对。
    **设计每一步时都问一句：这一步坏了，我怎么知道？** 答不上来就说明它会静默失败。
 
-### 7.10 🟡 并发 push 会让「构建 tag」与「部署 tag」错位
+### 7.10 ✅ 并发 push 的竞态：已实测 + 已用「跳过策略」解决
 
-改成 SHA tag 之后**新引入**的失效模式，之前的 `latest` 时代不存在（因为两边都是"最新"）。
+改成 SHA tag 之后**新引入**的失效模式，`latest` 时代不存在（因为两边都是"最新"）。
 
 **机制**：
 
 ```
 T0  push C1  → 流水线开始构建 tag=C1
 T1  push C2  → origin/main 立刻变成 C2
-T2  流水线部署阶段 git reset --hard origin/main  →  HEAD=C2
+T2  流水线（C1 那条）的部署阶段 reset --hard origin/main  →  HEAD=C2
                 IMAGE_TAG=C2，但 ACR 上可能还没有 C2 的镜像
                 → pull 失败 → 流水线红，线上不受影响
 ```
 
-**危害可控**：表现是**部署失败**，不是**部署错版本**。旧版本继续跑，不会出现
-"代码是 C2、镜像却是 C1"的静默不一致 —— 因为 compose 拿不到 tag 就根本不启动。
-
-**当前对策**：接受它。失败信息已经写得很明确（deploy.sh 里三条常见原因的提示）。
-
-**根治办法（待实测后启用）**：部署阶段直接用 Gitee 注入的 `GITEE_COMMIT`，
-而不是 `git rev-parse HEAD`，就彻底不受 origin/main 移动影响。
-
-`deploy.sh` 里已经放了一行诊断来收集证据：
+#### 实测结果：`GITEE_COMMIT` 在 shell@agent 里**能读到**
 
 ```
-DIAG GITEE_COMMIT=<值或 <unset>> GITEE_BRANCH=... GITEE_PIPELINE_BUILD_NUMBER=...
+14:26:24  DIAG GITEE_COMMIT=393f8bd...  GITEE_BRANCH=main  GITEE_PIPELINE_BUILD_NUMBER=36   ← 流水线触发
+14:34:06  DIAG GITEE_COMMIT=<unset>                                                          ← 手工回滚
 ```
 
-- 若显示 `<unset>` ⇒ shell@agent 里拿不到 Gitee 变量，保持现状。
-- 若显示完整 SHA 且等于 Image tag ⇒ **可以升级**：
-  把 `IMAGE_TAG` 的来源优先级改成 `GITEE_COMMIT` 优先，`git rev-parse HEAD` 兜底，
-  并同步 `git checkout --detach "$GITEE_COMMIT"`，让代码也锚定到构建时那个提交。
-  改完删掉诊断行。
+**所以本文档早先"shell@agent 不保证能读到 Gitee 系统变量"的判断是错的。**
+实测依据：Gitee《系统级变量》说 `GITEE_*`「可在任何任务内使用」，
+且 `shell@agent` 这条**确实**收到了逐提交的值 —— 以日志为准（§7.9.3）。
 
-> Gitee 官方文档说 `GITEE_*`「可在任何任务内使用」，但 `shell@agent` 是
-> **分布式调度到自建主机**的执行方式，与云端容器步骤环境不同 —— 按 §7.9.3
-> 「外部服务的规则必须实测」，以日志实际输出为准。
+#### 但别急着"改用 GITEE_COMMIT 当 tag" —— 那会引入更危险的 bug
+
+一个自然的想法是：部署时锚定到 `GITEE_COMMIT`，代码和镜像都用它。**这是错的**：
+
+```
+流水线 1（C1）跑得慢，流水线 2（C2）先部署成功
+流水线 1 随后才执行部署 → 锚定 C1 → 把线上从 C2 退回 C1
+```
+
+**顺序倒退，而且完全静默。** 比原来那个"拉不到镜像就报错"危险得多。
+（原来那种失败至少是**吵**的，线上也不会变。）
+
+#### 采用的对策：检测到过期就跳过
+
+```bash
+if [ -n "${GITEE_COMMIT:-}" ] && [ "$GITEE_COMMIT" != "$(git rev-parse "origin/$BRANCH")" ]; then
+  log "Skipping deploy: built commit ... is no longer the tip of main"
+  log "  本次不动线上 —— 那条更新的流水线会负责部署最新版本。"
+  exit 0
+fi
+```
+
+三种坏结果一个都不会发生：
+
+| 方案 | 并发 push 时 |
+|---|---|
+| 照旧 `reset --hard origin/main` | 新代码 + 旧提交镜像 → `pull` 报 manifest unknown → 白跑（吵、安全） |
+| 锚定 `GITEE_COMMIT` | 可能在新版本之后落地 → **顺序倒退**（静、危险） |
+| **过期即跳过（当前）** | 线上不动、流水线绿、日志说明原因；更新的那条负责上线 ✓ |
+
+`TARGET_COMMIT`（回滚）**不参与**这个判断 —— 回滚本来就是要倒退，是有意为之。
+
+> 一句话：**"部署哪个版本"这件事，只有在"它就是当前最新"时才成立。**
+> 一旦构建与部署之间隔了时间，就必须重新确认这个前提，而不是假定它还成立。
+
+`DIAG` 那行现在不是临时诊断，而是**永久保留的审计线索**：
+出问题时能直接对上是"哪次构建"把版本推上线的。
+手工执行时必然为 `<unset>`，属正常。
+
 
 ---
 
@@ -741,7 +769,7 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 - [ ] **阶段一收尾 A**：Cloudland 跑一次回滚验收（`rollback.sh 442178c`）—— 脚本同源，风险低，但没跑过就是没跑过
 - [ ] **阶段一收尾 B**：把线上从回滚点带回最新（`cd /root/pm-system && /bin/bash scripts/deploy.sh main`），顺便验证「回滚是临时止血，下次部署自动回到最新」
 - [ ] **阶段一收尾 C**：在 ACR 控制台删掉 `pm-*:latest` / `cloudland-*:latest`，杜绝误用
-- [ ] **阶段一收尾 D**：`grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log` —— **注意只能看流水线触发的部署**，手工执行时 Gitee 变量必为 `<unset>`
+- [ ] **阶段一收尾 D**：`grep 'DIAG GITEE_COMMIT' /var/log/pm-system-deploy.log` —— 已实测有值，并且已据此改掉竞态（§7.10）；这行现为常驻审计线索，手工执行显示 `<unset>` 属正常
 - [ ] **阶段二**：补纯单元测试，测试跑在 Dockerfile 里（§6.2）
 - [ ] **阶段三**：`deploy.sh` 健康检查补上后端（§6.3）—— 注意回滚脚本共用同一个健康检查，改一处覆盖两个场景
 - [ ] 记一笔：`.env` 不参与版本控制，**改过环境变量 schema 之后要重做一次回滚验收**（§6.1 隐性依赖）
