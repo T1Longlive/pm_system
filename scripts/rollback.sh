@@ -54,7 +54,15 @@ for arg in "$@"; do
     --yes|-y) ASSUME_YES="yes" ;;
     --show|-s) SHOW_ONLY="yes" ;;
     -h|--help)
-      sed -n '2,30p' "$0"
+      # 打印文件头部的注释块：跳过 shebang，到 `set -Eeuo` 为止。
+      # 用纯 bash 循环而不是 sed/awk —— 不引入外部命令依赖，也不会因行号漂移而截断。
+      while IFS= read -r line; do
+        case "$line" in
+          '#!'*) continue ;;
+          'set -Eeuo'*) break ;;
+        esac
+        printf '%s\n' "$line"
+      done < "$0"
       exit 0
       ;;
     *) TARGET_ARG="$arg" ;;
@@ -94,7 +102,11 @@ fi
 
 # ---------- 兼容性校验：目标提交必须支持 IMAGE_TAG ----------
 # 改造之前的提交，compose 里写死 :latest，回滚过去会拉错镜像，必须拦住。
-if ! git show "$TARGET_SHA:docker-compose.yml" 2>/dev/null | grep -q 'IMAGE_TAG'; then
+# 先分开判"文件不存在"和"文件里没有 IMAGE_TAG"，否则两者的报错文案会混淆排查方向。
+if ! git cat-file -e "$TARGET_SHA:docker-compose.yml" 2>/dev/null; then
+  die "提交 ${TARGET_SHA} 里没有 docker-compose.yml，无法回滚。"
+fi
+if ! git show "$TARGET_SHA:docker-compose.yml" | grep -q 'IMAGE_TAG'; then
   die "提交 ${TARGET_SHA} 的 docker-compose.yml 不使用 IMAGE_TAG（早于 tag 版本化改造），无法回滚。"
 fi
 
@@ -120,8 +132,10 @@ fi
 if [ "$ASSUME_YES" != "yes" ]; then
   echo
   echo "即将把线上从 $CURRENT_SHA 回滚到 $TARGET_SHA 。"
-  echo "确认请输 yes："
-  read -r reply
+  echo "确认请输 yes（若是非交互环境，请改用 --yes）："
+  # `|| reply=""` 不能省：set -e 下 read 遇到 EOF 会直接终止脚本，
+  # 那样"已取消"的提示还没打出来就退出了，用户只看到一个空荡荡的失败。
+  read -r reply || reply=""
   [ "$reply" = "yes" ] || die "已取消，线上未改动。"
 fi
 
