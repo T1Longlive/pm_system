@@ -31,15 +31,22 @@
 
 **四个阶段全部完成**：配置外置 → 镜像 tag 版本化 + 回滚 → 单元测试门禁 → 健康检查 + 内存加固。
 
-另有一条**并行的 IaC（基础设施即代码）线**在推进：Ansible 已能声明式管理服务器配置
-（`infra/ansible/`，6 个 playbook 都能跑通），**但还不能自动执行** ——
-所有 playbook 仍靠手动跑，这是当前最大的缺口（见 §10 的「IaC 收尾 ②」）。
+另有一条**并行的 IaC（基础设施即代码）线**：Ansible 已能声明式管理服务器配置
+（`infra/ansible/`，7 个 playbook）。
+
+**21:1x 跨过了那条分界线** —— 漂移检测已**每天 09:00 自动跑**（crontab，由 `apply/06` 管理）：
+跑 `audit/` 三探针 + `apply/` 三 `--check`，`changed≠0` 就报漂移。
+在此之前 playbook 全靠手动跑，而"靠人记得去跑"就等于没有持续收敛（§7.15 的实证）。
 
 **当天刚经历一次事故**：OOM 雪崩导致线上停摆约 30 分钟。已完成加固，
 可用内存从 **138 MiB 回到约 870 MiB**（快照值，会浮动），之后无新 OOM。细节见 §6.4。
 
 另：19:33 把 `apply/01` 号 playbook 真正执行了一遍，把 `live-restore` 收敛上线 ——
 **此前它一直没生效**（§7.15）。这是"IaC 只写期望状态、没有漂移检测"的实证。
+
+> ⚠️ **当天最后一件未了的事**：部署流水线**不再自动触发**了（20:47 起）。
+> 加过 `.workflow/` 第二个文件之后出现的，撤掉也没恢复 —— 见 §10 的「②b」。
+> 目前靠手动 `git reset --hard origin/main` 同步服务器。**这一条要优先处理。**
 
 ### 上手第一步
 
@@ -1346,6 +1353,53 @@ docker info                       ：Live Restore Enabled: false
 
 副作用检查：8 容器仍 `Up 3 hours`（未重启），两项目 HTTP 200，`available` 876 MiB。
 
+### 7.16 🔴 定时触发：Gitee 的 `schedule` 实测没生效，改用 crontab
+
+有了检测脚本，还差「**谁定期去跑它**」。先试的是 Gitee Go 自带的定时触发
+（官方《触发事件》文档明确写了三类触发：Push / PR / **定时**）：
+
+```yaml
+triggers:
+  trigger: auto
+  schedule:
+    - cron: '0 */2 * * ?'      # 字段 = 分 时 日 月 周，秒位系统自动补 0
+```
+
+**结论：实测没生效。** 设成每 15 分钟后，连续两个触发点（20:15、20:30）
+服务器上 `/var/log/pm-system-drift.log` **一条新记录都没有**。
+按 §7.9.3「外部规则必须实测」，没生效就是没生效，不去猜字段名。
+
+**而且撤掉之后部署流水线也没恢复触发** —— 说明往 `.workflow/` 里加第二个文件
+有未知副作用。⇒ **现阶段不要在 `.workflow/` 下放第二个 yml**。
+
+**改走服务器 crontab，并用 Ansible 管它**（`apply/06`）：
+
+```cron
+#Ansible: pm-system-drift-check
+0 9 * * * /bin/bash /root/pm-system/infra/ansible/drift-check.sh >> /var/log/pm-system-drift-cron.log 2>&1
+```
+
+**这一条必须验证到「真的跑了」为止** —— 因为 Gitee 那边恰恰就是卡在这一步：
+写进配置 ≠ 会执行。验证方式是用 `-e drift_cron_minute='*/5'` 临时改成每 5 分钟，
+**盯日志长出了两条**（21:05:01、21:10:01）才算数，然后改回每天 09:00、复跑 `changed=0`。
+
+**反向测试（缺了它就是买假保险）**：
+
+| 步骤 | 操作 | 期望 | 实测 |
+|---|---|---|---|
+| ① 基线 | 直接跑 | `RESULT: OK`，exit 0 | ✅ 6 个剧本全 `changed=0` |
+| ② 制造漂移 | 手工去掉 `daemon.json` 的 `live-restore`（**不 reload**，容器零影响） | — | — |
+| ③ 检出 | 再跑 | `RESULT: DRIFT`，exit **1**，精确指认 `01-docker-daemon.yml (changed=1)` | ✅ 完全一致 |
+| ④ 恢复 + 复跑 | 拷回备份 | 回到 `RESULT: OK`，exit 0 | ✅ |
+
+> **一个永远说 OK 的检查器比没有更危险** —— 所以 ① 和 ③ 缺一不可。
+
+**crontab 条目里两个容易踩的点**：
+- **重定向必须写**（`>> log 2>&1`）：cron 环境下没有终端，不重定向就什么都看不到，
+  而 cron **不会**给你任何失败告警。
+- **脚本存在性要先断言**（`06` 的前置检查）：否则 cron 会每天老老实实去执行一个
+  不存在的脚本 —— 静默失败，等于买了份假保险。
+
 ---
 
 ## 8. 关键文件索引
@@ -1404,8 +1458,11 @@ docker info                       ：Live Restore Enabled: false
 | `playbooks/apply/01-docker-daemon.yml` | 收敛 `daemon.json`（镜像源 + `live-restore`）✅ **2026-09-21 19:33 真实执行，把此前从未生效的 `live-restore` 收敛上线**；演练/执行/幂等三跑通过（漂移实证见 §7.15） |
 | `playbooks/apply/04-swap.yml` | 2 GiB swap + fstab（幂等，`/etc/fstab` 有 `backup: true`）✅ 演练 `changed=0` |
 | `playbooks/apply/05-ssh-authorized-keys.yml` | 授权公钥（**regexp 锚在公钥本体**，不是注释字段）✅ 已执行 |
+| `playbooks/apply/06-cron-drift-check.yml` | **把「每天自动跑漂移检测」本身纳入 IaC** —— `crontab` 条目，每天 09:00 ✅ 演练/执行/幂等三跑通过（§7.16） |
+| `drift-check.sh` | **漂移检测**（只读）：跑 `audit/` 三个探针 + `apply/` 三个 `--check`，`changed≠0` 即报漂移。退出码 0/1/2 = 无漂移/有漂移/检测出错 |
 
-**尚未纳入 IaC 的**：logrotate（暂时没配置）、crontab（暂无）、Cloudland 侧。
+**尚未纳入 IaC 的**：logrotate（暂时没配置）、Cloudland 侧。
+（~~crontab~~ 已由 `apply/06` 接管。）
 
 ---
 
@@ -1557,20 +1614,31 @@ free -m                         # 关注 available，不是 free
 
 ### IaC 收尾（当前最该做的方向）
 
-- [ ] 🔴 **② 自动执行 + 漂移检测** —— **这是当前最大的缺口**。
-  现在 6 个 playbook **全靠手动跑**，没有定时、没有流水线触发
-  ⇒ 「配置的**描述**在代码里，但**收敛**仍依赖有人记得去跑」。
-  **这条就是「基础设施即代码」与「一堆更好的脚本」的分界线。**
+- [x] ~~🔴 **② 自动执行 + 漂移检测**~~ —— **2026-09-21 21:1x 已落地**（§7.16）。
+  · **检测**：`infra/ansible/drift-check.sh` —— 跑 `audit/` 三探针 + `apply/` 三 `--check`，
+    `changed≠0` 即报漂移；退出码 0 无漂移 / 1 有漂移 / 2 检测出错。已做**反向测试**
+    （制造真漂移 → 精确指认 `01-docker-daemon.yml` → 恢复 → 归零）。
+  · **定时**：`apply/06-cron-drift-check.yml` 管 crontab，每天 09:00。
+    **实测真的会跑**（临时改每 5 分钟，日志长出 21:05:01、21:10:01 两条），随后改回每日、幂等 `changed=0`。
+  · **没走通的那条路**：Gitee Go 的 `triggers.schedule` **实测不生效**（两个触发点都没跑）。
+    ⚠️ 更要命的是往 `.workflow/` 加第二个 yml 之后，**部署流水线也停止触发**，
+    撤掉文件后仍未恢复 —— ⇒ **现阶段别在 `.workflow/` 下放第二个文件**。
+  · 🧾 补一条实证（§7.15）：`apply/01` 写着 `live-restore: true`、线上却是 `false`，
+    漂了几个小时才被人工核对发现。**有定时 `--check` 的话，第一次分叉就会报出来。**
 
-  🧾 **已经有一次实证了**（2026-09-21，见 §7.15）：`apply/01` 写了 `live-restore: true`，
-  线上却一直是 `false`，漂移了好几小时没人发现 ——
-  **靠的是一次人工核对 + `--check` 的 diff 才抓出来。**
-  若当时有定时 `--check`，它会在第一次漂移发生后就报出来。
+- [ ] 🔴 **②b 修好部署流水线不再触发的问题** —— 见 §7.16 末尾。
+  症状：20:47 之后的 push 一直没触发（往常 2~3 分钟必到），服务器停在旧提交，
+  撤掉新加的 `.workflow/drift-check.yml` 后**仍未恢复**。
+  怀疑是 Gitee 侧残留了那条新流水线，或个人版当天构建额度用尽（今天已跑到构建号 55+）。
+  ⇒ **需要到 Gitee 网页端看**：流水线列表是否多出一条 `pm-system-drift-check`
+  （有就删掉），以及额度/配额是否已满。
+  临时绕法（已用）：`ssh root@8.137.114.176 'cd /root/pm-system && git fetch origin main && git reset --hard origin/main'`。
   做法：建一条**只跑探针、不含构建阶段**的独立流水线，用 Gitee Go 的 `triggers.schedule` 定时触发，
   每天跑 `audit/` 的探针 + `apply/` 的 `--check`；**`--check` 报 `changed≠0` 就是漂移信号**（有人手工改了配置）。
   ⚠️ `triggers.schedule` **只在官方文档里见过、尚未实测** —— 按当天教训，**先验证再动流水线文件**
   （那份文件被网页编辑器坑过 4 次，§7.1）。
-- [ ] **③ 补齐还缺的配置项** —— logrotate（应用日志切割，目前没有）、crontab（目前没有）
+- [ ] **③ 补齐还缺的配置项** —— logrotate（应用日志切割，目前没有）。
+  （~~crontab~~ 已由 `apply/06` 接管，见 ②）
 - [ ] **Cloudland 纳入 IaC** —— `infra/ansible/` 目前只服务 pm-system。两项目同机同架构，共享价值高
 - [ ] 加 `-XX:+ExitOnOutOfMemoryError` 之后的**观察**：`docker stats` 看两个 backend 是否稳定在 180 MiB 附近，
   **以及 `RestartCount` 有没有涨**（涨了就是发生过 OOM 退出 —— 这正是 fail-fast 想要的可观测性）
