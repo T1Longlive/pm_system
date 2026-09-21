@@ -81,7 +81,10 @@ run_playbook() {
   fi
 
   log "  $mode $pb -> ok, changed=$changed"
-  printf '%s\n' "$changed"
+  # 只有 CHECK 模式才需要把计数交给调用方；AUDIT 打印它会在日志里留下孤立的数字
+  if [ "$mode" = "CHECK" ]; then
+    printf '%s\n' "$changed"
+  fi
   return 0
 }
 
