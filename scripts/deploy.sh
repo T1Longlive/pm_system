@@ -126,6 +126,55 @@ fi
 # 手工执行（回滚、手动部署）时必然为空，显示 <unset>，属正常。
 log "DIAG GITEE_COMMIT=${GITEE_COMMIT:-<unset>} GITEE_BRANCH=${GITEE_BRANCH:-<unset>} GITEE_PIPELINE_BUILD_NUMBER=${GITEE_PIPELINE_BUILD_NUMBER:-<unset>}"
 
+# ---------- 路径守卫：本次变更真的需要重新部署吗 ----------
+# 为什么需要这一步
+# ----------------
+# 流水线的触发条件只有「push 到 main」，**没有路径过滤** —— 改 docs/ 或 infra/
+# 也会走完整的构建 + 容器重建。
+#   构建浪费的是云端分钟数；而**容器重建才是危险的那一半**：
+#   2026-09-21 的 OOM 雪崩正是在容器重建的内存尖峰上被放大的
+#   （那天推了 6 次，每次都让两个 JVM 冷启动一遍）。
+#
+# 🔴 为什么守卫放在这里，而不是去改流水线的 triggers
+#   Gitee Go（个人版）的 push 触发只支持「分支 / Tag / 提交注释」三种匹配，
+#   **没有文件路径过滤** —— 那是 Gitee 企业版流水线的能力。
+#   在 triggers 里猜一个字段名，最坏情况是整个触发配置失效 →
+#   完全不再自动部署，那比"多部署几次"严重得多。
+#   放在这里则完全在版本控制内：可 review、可测试、不会被网页编辑器改掉。
+#
+# 判定方向刻意用「黑名单」（只有**全部**变更都落在非应用路径下才跳过）：
+#   漏判的后果偏向"多部署一次"（无害），而不是"该部署却跳过了"（危险）。
+if [ -z "$TARGET_COMMIT" ]; then
+  # 回滚模式（TARGET_COMMIT 非空）不参与此判断 —— 回滚是有意倒退，必须执行。
+  NON_APP_PATHS='^(docs/|infra/|\.workflow/|\.gitee/|\.github/|[^/]+\.md$|LICENSE$|\.gitignore$|\.gitattributes$)'
+
+  # 「当前线上跑的是哪个版本」以**容器实际使用的镜像 tag** 为准 ——
+  # 它比任何日志文件都真实（手工 docker compose up 不会更新日志文件）。
+  RUNNING_IMAGE="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
+  RUNNING_TAG="${RUNNING_IMAGE##*:}"
+
+  if [ -n "$RUNNING_TAG" ] && [ "$RUNNING_TAG" != "$IMAGE_TAG" ] \
+     && git cat-file -e "${RUNNING_TAG}^{commit}" 2>/dev/null; then
+    # 🔴 -c core.quotepath=false 不能省：
+    #    git 默认给含非 ASCII 的路径加双引号并做八进制转义，
+    #    `docs/CI-CD现状与补全计划.md` 会变成 `"docs/CI-CD\347\216\260..."` ——
+    #    以引号开头就匹配不上 ^docs/，会把"只改了文档"误判成"改了应用"。
+    #    这个坑是拿**真实提交历史**跑测试才发现的，光看正则看不出来。
+    CHANGED="$(git -c core.quotepath=false diff --name-only "$RUNNING_TAG" "$IMAGE_TAG")"
+
+    if [ -n "$CHANGED" ] && ! printf '%s\n' "$CHANGED" | grep -qvE "$NON_APP_PATHS"; then
+      log "Skipping deploy: 本次变更未触及应用路径（线上保持 $RUNNING_TAG）"
+      log "  变更文件（最多 20 条）："
+      printf '%s\n' "$CHANGED" | head -20 | sed 's/^/    /' | tee -a "$LOG_FILE"
+      log "  判定依据：以上路径全部命中非应用白名单之外为空 —— 即没有后端/前端/编排变更。"
+      exit 0
+    fi
+    log "变更触及应用路径，继续部署（$RUNNING_TAG -> $IMAGE_TAG）"
+  else
+    log "无法确定当前运行版本（容器不存在或该 tag 不在本地仓库），按常规继续部署"
+  fi
+fi
+
 # ---------- 登录检查 ----------
 # 私有仓库需要先登录。若没登录，pull 会失败并报 Authentication 相关错误，
 # 这里提前检测并给出可执行的提示，避免对着难懂的报错排查。
