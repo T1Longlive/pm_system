@@ -270,7 +270,7 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 | **阶段一** | 回滚能力（镜像 tag 版本化） | **100%** | ✅ tag 机制由构建器原始参数直接证实；回滚**用新 tag 实测通过**（§6.1） |
 | **阶段二** | 补上 CI（单元测试） | **100%** | ✅ **云端已验证**：构建日志 `Tests run: 24, Failures: 0`（§6.2） |
 | **阶段三** | 健康检查补上后端 | **~95%** | ✅ 健康路径生产实测 `stable 26s, restarts=0`；故障路径待验证（§6.3） |
-| 阶段四 | 内存与稳定性 | 0% | 可选，按需 |
+| 阶段四 | 内存与稳定性 | **100%** | ✅ **事故驱动，已完成**（JVM 堆上限 + MySQL 参数 + swap + `mem_limit`，见 §6.4） |
 
 ### 5.3 核心问题：原问题已解决，但边界要说清
 
@@ -884,24 +884,71 @@ cp .env.bak .env                          # 恢复
 
 ---
 
-### 阶段四：内存与稳定性（可选，按需）
+### 阶段四：内存与稳定性 —— ✅ 已完成（2026-09-21，由事故驱动）
 
-| 项 | 做法 | 何时做 |
+> 这一阶段原先标的是「可选，按需」。**2026-09-21 的一场 OOM 雪崩把它变成了必做项。**
+
+#### 事故（14:43 – 15:26，线上停摆约 30 分钟）
+
+全部来自 `dmesg` / `journalctl`，不是推测：
+
+```
+14:43:22  BT-Task 触发 oom-killer → 杀 cloudland-mysql 的 mysqld
+14:44:17  杀第二个 mysqld
+14:44:31  杀 cloudland-backend 的 java
+14:45:12  mysqld 触发 oom-killer → 杀掉 dockerd 自己（anon-rss 1005360kB = 1 GB）
+14:47:02  再杀 mysqld
+14:47:14  再杀 dockerd
+14:52:30  systemd 拉起 dockerd
+14:54:26  dockerd 又被杀（status=9/KILL），NRestarts=2
+14:54:30  dockerd 日志：ShouldRestart failed ... hasBeenManuallyStopped=true
+          ⇒ 7 个容器不会被自动拉起（只有 pm-mysql 被重启策略拉回）
+15:25     手动分步恢复，两个项目均恢复 HTTP 200
+```
+
+**根因是结构性超配，不是偶发**：
+
+| 项 | 值 |
+|---|---|
+| 宿主机 | 1870 MiB |
+| 非容器底座 | ~250 MiB（阿里云盾 / 宝塔 / Gitee runner / dockerd / containerd / journald） |
+| 每套栈（加固前） | ~725 MiB = Java ~350 + MySQL ~360 + Redis + nginx |
+| 两套栈合计 | 1450 MiB ⇒ **1700 / 1870，余量仅 138 MiB** |
+
+**推手**：流水线触发条件只有「push 到 main」，**没有路径过滤** → 改 `infra/` 也会走完整的构建 + 容器重建。当天推了 6 次，每次都要冷启动两个 JVM。
+
+#### 已实施的四项措施与实测效果
+
+| 措施 | 位置 | 实测 |
 |---|---|---|
-| JVM 堆上限 | 加环境变量 `JAVA_TOOL_OPTIONS: "-Xmx256m"` | 若观察到可用内存持续下降 |
-| **注意** | 两个 Dockerfile 都是 exec 形式 `ENTRYPOINT ["java","-jar",...]`，**不吃 `JAVA_OPTS`**，必须用 `JAVA_TOOL_OPTIONS` | |
-| 加 swap | `fallocate -l 2G /swapfile2` + `mkswap` + `swapon` | 想要安全网时 |
-| 升级 ECS 到 4G | 控制台操作 | 想让两套应用跑得舒服 |
+| `JAVA_TOOL_OPTIONS: "-Xmx320m -XX:+UseSerialGC -Xss512k"` | 两项目 compose 的 backend | pm-backend **~350 → 179 MiB**；cloudland-backend **318 → 178 MiB** |
+| `command: --innodb-buffer-pool-size=64M --performance-schema=OFF` | 两项目 compose 的 mysql | mysqld **~355 → ~125 MiB** |
+| 加 2 GiB swap（`/swapfile2`，写入 `/etc/fstab`） | 宿主机 | 吸收冷启动尖峰（**注意：这加的是缓冲垫，不是省内存**） |
+| **`mem_limit`**：backend 512m / mysql 384m / redis 128m / frontend 64m | 两项目 compose 的每个服务 | **爆炸半径控制** —— 超了只杀这个容器，不波及 dockerd |
 
-**当前内存实测（两套 + 1Panel + runner 全跑）**：
-```
-Mem:  1.8Gi total / 1.7Gi used / available 175Mi
-Swap: 1.0Gi / 356Mi used
-```
-**可用仅 175Mi —— 能跑，但余量薄。**
-好消息：方案 B 之后**部署不再产生编译峰值**，压力只来自「运行」。
+**`mem_limit` 与前三项是两个层次**：前三项管「少用内存」（水位），`mem_limit` 管「失控时的边界」（故障范围）。
+事故里 dockerd 被杀，根源正是**全部 8 个容器都没有内存限制** —— 任何一个都能吃满 1.87 GiB。
 
----
+> ⚠️ 各限额之和（2176 MiB）大于物理内存（1870 MiB）—— 这是刻意的：`mem_limit` 是「单个容器的失控边界」，**不是总量配额**。
+
+#### 结果
+
+**`available`：事故前 138 MiB → 加固后 830 MiB（约 6 倍）。** 两个项目 HTTP 200，8 容器全 Up，事故后至今无新 OOM。
+
+#### 🔴 排查过程中踩到并固化的三条
+
+1. **这台机器上禁止跑 `docker system df`** —— 它要遍历每一条镜像层累计占用，在 available 138 MiB 时会迅速把内存推爆（实测卡死 3 分 33 秒后 socket EOF，期间 dockerd 被 OOM 杀了两次）。磁盘审计改用纯文件系统路径（`du -shx` / `df`）。
+2. **`du` 对 `/var/lib/docker` 必须带 `-x`** —— 不加会把 `overlay2/*/merged`（运行中容器的合并视图**挂载点**）重复计算，实测把 **12 G 虚报成 64 G**。
+3. **判断流水线是否跑过，看服务器 `/var/log/pm-system-deploy.log`** —— 不要用 `docker manifest inspect` 探测 ACR，本仓库用那种方法得出过错误结论。
+
+#### 附带产出：`deploy.sh` 路径守卫（提交 `dfd6821`）
+
+针对上文那个「推手」。因为 **Gitee Go（个人版）的 push 触发没有文件路径过滤**（那是企业版的能力，详见 §7），
+守卫放在 `deploy.sh` 而不是流水线 `triggers` 里 —— 完全在版本控制内、可 review、可测试、不会被网页编辑器改掉。
+
+> 只有**全部**变更都落在非应用路径下才跳过部署；判定方向刻意选成黑名单，让漏判偏向「多部署一次」（无害），而非「该部署却跳过」（危险）。
+> 详细说明与那个 `core.quotepath` 的坑见 `scripts/deploy.sh` 的文件内注释。
+
 
 ## 7. 已知坑与铁律（**最值钱的一节**）
 
@@ -1236,7 +1283,12 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 - [ ] 记一笔：`.env` 不参与版本控制，**改过环境变量 schema 之后要重做一次回滚验收**（§6.1 隐性依赖）
 - [ ] 确认 Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段问题）
 - [x] ~~清理 `backend/Dockerfile` 第 27 行过时注释（写着"测试在 CI 跑"，实际没有）~~ —— 阶段二已顺手修掉，并把测试真的接上了
-- [ ] 按需：JVM 堆上限 / 加 swap / 升级 ECS 到 4G（§6.4）
+- [x] ~~按需：JVM 堆上限 / 加 swap / 升级 ECS 到 4G（§6.4）~~ —— **2026-09-21 事故驱动完成了前三项**（JVM 堆上限 + MySQL 参数 + swap + `mem_limit`）。升级 ECS 仍可选，但余量已回到 830 MiB，不急
+- [ ] 🔴 **轮换服务器 root 密码** —— 2026-09-21 排查事故时它曾以明文出现在聊天记录里。SSH 已改为专用密钥（注释 `ai-agent`）认证，密码不再是必需
+- [x] ~~给流水线加路径过滤~~ —— 查证后确认 **Gitee Go 个人版没有这个能力**（那是企业版的功能），改在 `scripts/deploy.sh` 里加路径守卫（§6.4，提交 `dfd6821`）
+- [ ] **Cloudland 的 `deploy.sh` 同样加路径守卫** —— pm-system 已加，Cloudland 还没做
+- [ ] 决策：要不要加 `-XX:+ExitOnOutOfMemoryError` —— 加了之后 OOM 会直接退出 → 容器重启 → 健康检查立刻发现（fail-fast 换可观测性）。可用 `JAVA_TOOL_OPTIONS` 加，**无需重建镜像**
+- [ ] 观察几天：`docker stats` 看两个 backend 是否稳定在 180 MiB 附近。持续爬升 ⇒ 额度偏小或有内存泄漏
 - [x] ~~上线后立即修改初始管理员密码~~ —— 已改
 - [ ] Cloudland 首页标语统一：`HomeView.vue` 第 13 行英文版、`LoginForm.vue` 第 10/45 行仍是旧文案
 
