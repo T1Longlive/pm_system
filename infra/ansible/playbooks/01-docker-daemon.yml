@@ -82,7 +82,12 @@
 
 - name: 收敛 Docker daemon 配置到期望状态
   hosts: pm_servers
-  gather_facts: false
+  # gather_facts 不只是为了拿 facts —— setup 模块同时是
+  # 「被管端解释器能否工作」的最早、最响的检查点。
+  # 若解释器版本不被 ansible-core 支持，这里会**大声失败**；
+  # 而命令类任务因为普遍关掉了失败判定（failed_when: false），
+  # 会表现为"任务 ok、但 stdout 是空的"——极难排查。
+  gather_facts: true
   become: false
 
   vars:
@@ -119,6 +124,24 @@
     # ================================================================
     # 一、前置检查 —— 动手之前先确认前提条件成立
     # ================================================================
+    # 🔴 这一条是被真实事故逼出来的（2026-09-21）：
+    #   控制端从 ansible-core 2.11 升到 2.19 后，被管端解释器
+    #   仍是 Python 3.6.8，而 2.19 要求被管端 3.8+。
+    #   模块因此**根本没在被管端执行**，只返回一个 msg；
+    #   register 出来的变量没有 stdout，而只读任务都关着失败判定，
+    #   于是整个 playbook 看起来"全 ok"，实际每一条读到的都是空值。
+    #   ⇒ 必须有一道**故意的、必须成功的**检查来顶住这个边界。
+    - name: "前置检查 | 断言被管端 Python 在 ansible-core 的支持区间内"
+      ansible.builtin.assert:
+        that:
+          - ansible_python_version is version('3.8', '>=')
+        fail_msg: >-
+          被管端 Python 是 {{ ansible_python_version }}，低于 ansible-core 2.19
+          要求的 3.8。模块会在被管端静默失败，只留下空的 stdout —— 极难排查。
+          修法：把 inventory.ini 的 ansible_python_interpreter 指向
+          /usr/bin/python3.11（dnf install -y python3.11 即可）。
+        success_msg: "被管端 Python {{ ansible_python_version }}，在支持区间内。"
+
     - name: "前置检查 | 查询 Docker 守护进程状态"
       ansible.builtin.command: systemctl is-active docker
       register: docker_active

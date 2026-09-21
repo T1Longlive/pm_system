@@ -32,7 +32,10 @@
 
 - name: 审计日志占用（只读）
   hosts: pm_servers
-  gather_facts: false
+  # 同 01：gather_facts 兼任「被管端解释器可用性」的检查点。
+  # 本 playbook 是纯探针，全程依赖 register 出来的 stdout，
+  # 一旦模块没在被管端执行，读到的全是空值却仍显示 ok —— 最坏的一种失败。
+  gather_facts: true
   become: false
 
   vars:
@@ -40,6 +43,25 @@
     app_dir: /root/pm-system
 
   tasks:
+
+    # ================================================================
+    # 零、前置检查 —— 必须先证明"读到的值是真的"
+    # ================================================================
+    # 🔴 纯探针最怕的不是报错，而是**静默读到空值**。
+    #   2026-09-21 真实事故：控制端升到 ansible-core 2.19 后，
+    #   被管端解释器仍是 3.6.8（2.19 要求 3.8+），模块没能执行，
+    #   于是本 playbook 的每一条都显示 ok、值却全是空。
+    #   所以第一件事就是把这个边界顶住。
+    - name: "零 | 断言被管端 Python 在 ansible-core 的支持区间内"
+      ansible.builtin.assert:
+        that:
+          - ansible_python_version is version('3.8', '>=')
+        fail_msg: >-
+          被管端 Python 是 {{ ansible_python_version }}，低于 ansible-core 2.19
+          要求的 3.8。模块会在被管端静默失败、只留下空 stdout。
+          修法：把 inventory.ini 的 ansible_python_interpreter 指向
+          /usr/bin/python3.11（dnf install -y python3.11 即可）。
+        success_msg: "被管端 Python {{ ansible_python_version }}，在支持区间内。"
 
     # ================================================================
     # 一、守护进程当前的日志配置

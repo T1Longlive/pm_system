@@ -84,6 +84,26 @@ prefix_for() {
   esac
 }
 
+# 读出已有 venv 里 ansible-core 的版本；读不到就返回空串。
+# 有两个来源，顺序不能反：
+#   1) 包元数据 —— 最准确
+#   2) 解析 ansible --version 首行 —— 回退
+# 为什么要回退：`importlib.metadata` 是 Python **3.8** 才进标准库的，
+# 而本机旧的 venv 建在 3.6 上 —— 于是首次运行时它读不出来，
+# 只能显示 <未知>。功能上没问题（反正要重建），但一个"未知"会让人怀疑
+# 是不是检测逻辑坏了。能确定的就显示确定的值。
+installed_ansible_version() {
+  local venv="$1"
+  local version
+  version="$("$venv/bin/python" -c \
+    'import importlib.metadata as m; print(m.version("ansible-core"))' 2>/dev/null || true)"
+  if [ -z "$version" ]; then
+    version="$("$venv/bin/ansible" --version 2>/dev/null \
+      | head -1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
+  fi
+  printf '%s\n' "$version"
+}
+
 if ! INTERPRETER="$(choose_interpreter)"; then
   cat >&2 <<'EOF'
 [bootstrap] ERROR: 找不到 python3.11 / 3.12 / 3.13。
@@ -107,8 +127,7 @@ log "钉死的区间   : $CONSTRAINT"
 # 2. 已有 venv 是否已满足期望？满足即退出（幂等）
 # ----------------------------------------------------------------------
 if [ -x "$VENV_DIR/bin/ansible" ]; then
-  installed="$("$VENV_DIR/bin/python" -c \
-    'import importlib.metadata as m; print(m.version("ansible-core"))' 2>/dev/null || true)"
+  installed="$(installed_ansible_version "$VENV_DIR")"
   case "$installed" in
     "$EXPECTED_PREFIX".*)
       log "已满足期望：ansible-core $installed，无需变更"
@@ -150,8 +169,7 @@ log "已创建 venv: $VENV_DIR"
 # 4. 自检 —— 这一步不能省
 # ----------------------------------------------------------------------
 # 既然 pip 会静默降级，唯一可靠的确认方式就是**装完把版本打出来**。
-installed="$("$VENV_DIR/bin/python" -c \
-  'import importlib.metadata as m; print(m.version("ansible-core"))')"
+installed="$(installed_ansible_version "$VENV_DIR")"
 case "$installed" in
   "$EXPECTED_PREFIX".*)
     log "✅ 版本核对通过：ansible-core $installed（期望 $EXPECTED_PREFIX.x）"
