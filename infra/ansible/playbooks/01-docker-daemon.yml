@@ -1,0 +1,228 @@
+---
+# ======================================================================
+# 01-docker-daemon.yml —— 把 Docker 守护进程配置收敛到「期望状态」
+# ----------------------------------------------------------------------
+# 这是本仓库第一个**会真正修改系统**的 playbook。
+# 因此它同时是一份「改生产配置」的标准样板，三件事缺一不可：
+#
+#   1) 改之前先备份            → copy 的 backup: true
+#   2) 优先 reload 而非 restart → 见下方专门一节
+#   3) 改完证明副作用为零       → 断言所有容器都没有被重启
+#
+# ----------------------------------------------------------------------
+# 期望状态从哪来
+# ----------------------------------------------------------------------
+# 由 00-baseline.yml 采集到的**事实**（不是猜测）：
+#   /etc/docker/daemon.json 里的 registry-mirrors 有 3 条：
+#     · https://docker.mirrors.ustc.edu.cn   ← 已停止服务，DNS 不再解析
+#     · https://mirror.ccs.tencentyun.com    ← 腾讯云**内网**地址，
+#                                              这台是阿里云 ECS，不可达
+#     · https://docker.1panel.live           ← 实测可用（Cloudland 的镜像就走它）
+#
+#   机制提醒：Docker **按顺序逐个尝试**镜像源，失败才跳到下一个。
+#   所以死源不会让拉取失败，但每次拉取都要在它身上白等一次。
+#   属于"不致命、但持续漏油"的配置 —— 正是 IaC 最适合收拾的那类问题。
+#
+# ----------------------------------------------------------------------
+# 🔴 为什么必须用 reload，不能用 restart
+# ----------------------------------------------------------------------
+# `systemctl restart docker` 会**杀掉并重建所有容器**。
+# 这台机器上同时跑着 pm-system 与 Cloudland 共 8 个容器，
+# 而 00-baseline 实测 **available 内存只剩 138 MiB**。
+# 8 个容器同时冷启动（其中两个是 JVM）极可能触发 OOM Killer ——
+# 而 OOM 杀进程时**日志里往往什么都不写**，事后极难定位。
+#
+# Docker 支持 SIGHUP 热加载，`registry-mirrors` 属于可热加载的配置项。
+# 所以 `systemctl reload docker` 既能让新配置生效，又**不触碰任何容器**。
+#
+# ----------------------------------------------------------------------
+# 🔴 check 模式的两个陷阱（本文件的写法就是解法）
+# ----------------------------------------------------------------------
+# trap 1：`command` / `shell` 任务在 --check 下**默认被跳过**。
+#   于是"前置读取"拿不到值，后面引用它的断言会因 undefined 直接报错，
+#   演练根本跑不完。
+#   → 解法：只读任务显式加 `check_mode: false`，强制它们在演练中也执行。
+#
+# trap 2：演练时 `copy` 并没有真的写文件，所以"事后验证"必然失败
+#   （读到的还是旧内容，断言"死源已移除"会挂）。
+#   → 解法：事后验证任务加 `when: not ansible_check_mode`。
+#
+# ----------------------------------------------------------------------
+# 执行方式
+# ----------------------------------------------------------------------
+#   第一步（只读演练，一个字节都不写）：
+#     cd /root/pm-system/infra/ansible
+#     /root/.ansible-venv/bin/ansible-playbook -i inventory.ini \
+#         playbooks/01-docker-daemon.yml --check --diff
+#
+#   第二步（确认变更清单无误后，真正执行）：
+#     /root/.ansible-venv/bin/ansible-playbook -i inventory.ini \
+#         playbooks/01-docker-daemon.yml
+#
+#   第三步（验证幂等 —— 这是 IaC 的验收标准）：
+#     /root/.ansible-venv/bin/ansible-playbook -i inventory.ini \
+#         playbooks/01-docker-daemon.yml
+#     # 再跑一次必须 changed=0，且不产生新的备份文件
+# ======================================================================
+
+- name: 收敛 Docker daemon 配置到期望状态
+  hosts: pm_servers
+  gather_facts: false
+  become: false
+
+  vars:
+    docker_daemon_json: /etc/docker/daemon.json
+
+    # ---- 期望状态：只保留实测可用的镜像源 ----
+    # 若日后从阿里云控制台拿到本 ECS 的专属加速地址
+    # （形如 https://<你的ID>.mirror.aliyuncs.com），
+    # 把它加到这个列表**最前面** —— Docker 按顺序尝试，先命中的更快。
+    docker_registry_mirrors:
+      - https://docker.1panel.live
+
+  handlers:
+    # handler 只在"有任务通知它"时才执行。
+    # 这正是幂等的关键：配置没变 → copy 不 changed → handler 不触发 →
+    # 第二次运行 changed=0，也不会白白热加载一次 Docker。
+    #
+    # `when: not ansible_check_mode`：演练时绝不能让 Docker 真的被 reload。
+    # （systemd 模块本身通常尊重 check 模式，但这条护栏是零成本的保险。）
+    - name: 热加载 Docker 配置
+      ansible.builtin.systemd:
+        name: docker
+        state: reloaded
+      when: not ansible_check_mode
+
+  tasks:
+
+    # ================================================================
+    # 一、前置检查 —— 动手之前先确认前提条件成立
+    # ================================================================
+    - name: "前置检查 | 查询 Docker 守护进程状态"
+      ansible.builtin.command: systemctl is-active docker
+      register: docker_active
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: "前置检查 | 断言 Docker 正在运行"
+      ansible.builtin.assert:
+        that:
+          - docker_active.stdout == 'active'
+        fail_msg: >-
+          Docker 守护进程当前不是 active（实际为 {{ docker_active.stdout }}）。
+          先把它恢复正常，再改配置文件 —— 否则改完也验证不了。
+        success_msg: "Docker 守护进程 active，可以继续。"
+
+    - name: "前置检查 | 读取当前的 daemon.json"
+      ansible.builtin.command: cat {{ docker_daemon_json }}
+      register: daemon_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # 记录"改动前"的容器启动时刻。
+    # 用 StartedAt 而不是 docker ps 的 "Up 8 minutes" —— 后者随时间变化，
+    # 无法做精确比较；前者是固定时间戳，相等就证明容器完全没被动过。
+    # 注意 {% raw %}：Docker 自己的模板语法也是 {{ }}，
+    # 不转义的话会被 Jinja 抢先解析，报"未定义变量 .State.StartedAt"。
+    - name: "前置检查 | 记录各容器启动时刻（热加载前）"
+      ansible.builtin.shell: >-
+        docker ps -q | xargs docker inspect
+        -f {% raw %}'{{.Name}} {{.State.StartedAt}}'{% endraw %} | sort
+      register: containers_before
+      changed_when: false
+      check_mode: false
+
+    # ================================================================
+    # 二、应用期望状态
+    # ================================================================
+    - name: "应用 | 写入期望的 daemon.json"
+      ansible.builtin.copy:
+        # 用 to_nice_json 从数据结构生成，从根上保证是合法 JSON ——
+        # 手写 JSON 字符串一旦写错，Docker 会直接起不来。
+        content: "{{ {'registry-mirrors': docker_registry_mirrors} | to_nice_json }}\n"
+        dest: "{{ docker_daemon_json }}"
+        owner: root
+        group: root
+        mode: "0644"
+        # 改系统配置前永远先备份。Ansible 会在旁边写一个带时间戳的
+        # .bak 文件，出问题一条 cp 就能退回去。
+        # 另一个好处：**没有变更时不会产生备份**，于是"目录里多了个 .bak"
+        # 本身就是"这次确实改了东西"的证据。
+        backup: true
+      register: daemon_write
+      notify: 热加载 Docker 配置
+
+    # ================================================================
+    # 三、让变更生效并立刻验证
+    # ================================================================
+    # meta: flush_handlers 是"把挂起的 handler 立刻执行"。
+    # 不加这一行，handler 会等到整个 play 结束才跑，
+    # 我们就没法在同一轮里完成"变更 → 生效 → 验证"的闭环。
+    - name: "应用 | 立即执行挂起的 handler（热加载 Docker）"
+      ansible.builtin.meta: flush_handlers
+
+    - name: "验证 | 读取生效后的 daemon.json"
+      ansible.builtin.command: cat {{ docker_daemon_json }}
+      register: daemon_after
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: "验证 | 读取 Docker 实际生效的镜像源"
+      ansible.builtin.shell: docker info | grep -A5 'Registry Mirrors'
+      register: docker_mirrors_now
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: "验证 | 记录各容器启动时刻（热加载后）"
+      ansible.builtin.shell: >-
+        docker ps -q | xargs docker inspect
+        -f {% raw %}'{{.Name}} {{.State.StartedAt}}'{% endraw %} | sort
+      register: containers_after
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: "验证 | 断言死掉的镜像源已被移除"
+      ansible.builtin.assert:
+        that:
+          - "'ustc' not in daemon_after.stdout"
+          - "'tencentyun' not in daemon_after.stdout"
+          - "'docker.1panel.live' in daemon_after.stdout"
+        fail_msg: "写入后的 daemon.json 内容不符合期望：{{ daemon_after.stdout }}"
+        success_msg: "期望的镜像源已写入，两条不可用源已移除。"
+      when: not ansible_check_mode
+
+    # 这是本 playbook 最重要的一条断言：
+    # 它把"我以为 reload 不会重启容器"变成"我证明了 reload 没重启容器"。
+    - name: "验证 | 断言没有任何容器被重启"
+      ansible.builtin.assert:
+        that:
+          - containers_before.stdout == containers_after.stdout
+        fail_msg: |
+          容器被重启了！reload 没有起到热加载的作用。
+          改动前：{{ containers_before.stdout_lines }}
+          改动后：{{ containers_after.stdout_lines }}
+          回滚：把 daemon.json 的 .bak 覆盖回去，再 systemctl reload docker
+        success_msg: >-
+          全部容器的 StartedAt 完全一致 ——
+          reload 确实只热加载了配置，一个容器都没被动过。
+      when: not ansible_check_mode
+
+    # ================================================================
+    # 四、报告
+    # ================================================================
+    - name: "报告 | 本次变更摘要"
+      ansible.builtin.debug:
+        msg:
+          - "运行模式      : {{ '演练（--check，未写入任何内容）' if ansible_check_mode else '实际执行' }}"
+          - "是否发生变更  : {{ '是，daemon.json 已更新' if daemon_write.changed else '否，已是期望状态（幂等命中）' }}"
+          - "备份文件      : {{ daemon_write.backup_file | default('（未产生，说明没有变更或处于演练模式）') }}"
+          - "改动前        : {{ daemon_before.stdout | default('（读取失败）') }}"
+          - "改动后        : {{ daemon_after.stdout | default('（演练模式未执行）') }}"
+          - "Docker 实际生效:"
+          - "{{ docker_mirrors_now.stdout_lines | default(['（演练模式未执行）']) }}"
