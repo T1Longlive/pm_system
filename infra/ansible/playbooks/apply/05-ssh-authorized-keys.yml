@@ -99,9 +99,16 @@
     - name: "3/4 | 确保授权公钥存在"
       ansible.builtin.lineinfile:
         path: "{{ auth_keys_file }}"
-        # 用「注释字段」做匹配锚点：这样即使公钥内容换了，同一把钥匙也会被更新
-        # 而不是追加成第二行。
-        regexp: '\s+{{ item.split()[-1] }}\s*$'
+        # 🔴 用「公钥本体」做匹配锚点，**不要用注释字段**。
+        #    注释是给人看的、随时可改；公钥本体才是身份本身。
+        #    这个坑是实测踩到的：早先手工追加这把钥匙时换行没被正确解释，
+        #    行尾变成了 `ai-agentn`（注释里多了一个 n）。
+        #    按注释匹配就匹配不上 → lineinfile 只会**再追加一行**，
+        #    于是同一把钥匙在文件里出现两次、其中一行还是坏的。
+        #    锚在公钥本体上，lineinfile 会**替换**那一行 —— 坏行被就地修好，
+        #    而且天然幂等（第二次跑无变更）。
+        # ⚠️ base64 里含 `+` 和 `/`（正则特殊字符），必须 regex_escape。
+        regexp: '^ssh-ed25519\s+{{ item.split()[1] | regex_escape }}'
         line: "{{ item }}"
         state: present
         create: true
@@ -126,16 +133,23 @@
       check_mode: false
       when: not ansible_check_mode
 
-    - name: "4/4 | 断言每把公钥都恰好出现一次"
+    - name: "4/4 | 断言每把公钥恰好一行、且没有残留的坏行"
       ansible.builtin.assert:
         that:
           - verify_keys.stdout != 'MISSING'
-          - verify_keys.stdout_lines | select('search', item.split()[-1]) | list | length == 1
+          # 按「公钥本体」计数，而不是按注释字段 ——
+          # 否则残留的坏行（注释变成 `ai-agentn`）不会被算进去，断言会漏报。
+          # 计入所有以该公钥本体开头的行：多一行就是没收敛干净。
+          - >-
+            verify_keys.stdout_lines
+            | select('search', '^ssh-ed25519\s+' ~ (item.split()[1] | regex_escape))
+            | list | length == 1
         fail_msg: >-
-          公钥 {{ item.split()[-1] }} 未达到期望状态（应恰好 1 行）。
+          公钥未达到期望状态（应恰好 1 行，实际见下）。
+          可能有手工追加时留下的坏行没被替换掉。
           实际输出：{{ verify_keys.stdout }}
           回滚：把 {{ (key_results.results | selectattr('backup_file', 'defined') | map(attribute='backup_file') | list | first) | default('authorized_keys 的 .bak') }} 覆盖回去
-        success_msg: "公钥 {{ item.split()[-1] }} 已就位，且只有一行。"
+        success_msg: "公钥本体恰好 1 行，无残留坏行。"
       loop: "{{ authorized_keys }}"
       when: not ansible_check_mode
 
