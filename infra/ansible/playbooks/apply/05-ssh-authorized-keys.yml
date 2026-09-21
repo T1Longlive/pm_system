@@ -1,0 +1,148 @@
+---
+# ======================================================================
+# apply/05-ssh-authorized-keys.yml —— 让「谁能登录这台机器」也进入版本控制
+# ----------------------------------------------------------------------
+# 为什么有这个文件
+# ----------------
+# 2026-09-21 为了让 AI 能直接操作服务器，**手工**把一个专用公钥
+# （注释 `ai-agent`）追加进了 /root/.ssh/authorized_keys。
+# 这是当天第三处"手工做的、没有代码记录的变更"。
+#
+# 把 authorized_keys 纳入代码的价值不只是"可重建"，更是**可审查**：
+#   现在「谁有这台机器的登录权」是一个可以被 review、被 diff 的东西，
+#   而不是藏在服务器某个文件里、只有翻文件才知道。
+#
+# 🔴 刻意的设计选择：本 playbook 只做「确保存在」，**不做「删除多余的」**
+#   把 authorized_keys 收敛成"恰好这几把钥匙"听起来更彻底，
+#   但那会误删别人的密钥 —— 而登录权一旦删错，人可能直接进不去机器，
+#   还要走控制台/救援模式才能修回来。
+#   ⇒ 收益（多删几行）远小于风险（把自己锁在门外）。**故意不做。**
+#
+# 撤销一把钥匙怎么做：把下面 authorized_keys 里对应那行删掉并重跑本 playbook，
+#   再手工删服务器上那一行（因为本文件不删多余行）。
+#   更直接的办法：在服务器上 `sed -i '/ai-agent/d' /root/.ssh/authorized_keys`。
+#
+# ⚠️ 为什么用 ansible.builtin.lineinfile 而不是 ansible.posix.authorized_key：
+#   后者属于 collection，**本服务器没有安装任何 collection**（见 MEMORY.md 的 IaC 一节），
+#   用了会直接报 "couldn't resolve module/action"。ansible.builtin 才是可靠的选择。
+#
+# 执行方式：
+#   cd /root/pm-system/infra/ansible
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/05-ssh-authorized-keys.yml --check --diff
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/05-ssh-authorized-keys.yml
+# ======================================================================
+
+- name: 收敛 SSH 授权公钥
+  hosts: pm_servers
+  gather_facts: true
+  become: false
+
+  vars:
+    ssh_dir: /root/.ssh
+    auth_keys_file: /root/.ssh/authorized_keys
+
+    # 允许登录这台机器的公钥清单。
+    # ⚠️ 这里只放**公钥**，公钥不是秘密，入库是安全的（也是刻意的：方便审查）。
+    #    私钥在各自的使用者本机，永远不进这个仓库。
+    authorized_keys:
+      - >-
+        ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIB32yV7OSoG3tdLb0Fw9+Tq9RR9YetuvnjOx1iioHDe
+        ai-agent
+
+  tasks:
+
+    # ================================================================
+    # 零、前置检查
+    # ================================================================
+    - name: "零 | 断言被管端 Python 在 ansible-core 的支持区间内"
+      ansible.builtin.assert:
+        that:
+          - ansible_python_version is version('3.8', '>=')
+        fail_msg: >-
+          被管端 Python 是 {{ ansible_python_version }}，低于 ansible-core 2.19
+          要求的 3.8。模块会在被管端静默失败、只留下空 stdout。
+          修法：inventory.ini 的 ansible_python_interpreter 指向 /usr/bin/python3.11。
+        success_msg: "被管端 Python {{ ansible_python_version }}，在支持区间内。"
+
+    # ================================================================
+    # 一、现状
+    # ================================================================
+    - name: "1/4 | 读取现有授权公钥的注释字段（只取注释，不打印完整公钥）"
+      ansible.builtin.shell: >-
+        test -f {{ auth_keys_file }} || { echo "（文件不存在）"; exit 0; }
+        ; awk '{print "  " $NF}' {{ auth_keys_file }}
+      register: keys_now
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: "1/4 | 现有授权（只看注释字段就够识别）"
+      ansible.builtin.debug:
+        var: keys_now.stdout_lines
+
+    # ================================================================
+    # 二、目录与文件权限
+    # ================================================================
+    # authorized_keys 的权限不对，sshd 会**静默拒绝**使用它 ——
+    # 表现为"明明加进去了却还是不让登录"，很难查。所以显式收敛。
+    - name: "2/4 | 确保 .ssh 目录存在且权限 0700"
+      ansible.builtin.file:
+        path: "{{ ssh_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    # ================================================================
+    # 三、确保每把公钥都在（幂等 + 备份）
+    # ================================================================
+    - name: "3/4 | 确保授权公钥存在"
+      ansible.builtin.lineinfile:
+        path: "{{ auth_keys_file }}"
+        # 用「注释字段」做匹配锚点：这样即使公钥内容换了，同一把钥匙也会被更新
+        # 而不是追加成第二行。
+        regexp: '\s+{{ item.split()[-1] }}\s*$'
+        line: "{{ item }}"
+        state: present
+        create: true
+        owner: root
+        group: root
+        mode: "0600"
+        # 动登录凭据前永远先备份
+        backup: true
+      loop: "{{ authorized_keys }}"
+      register: key_results
+
+    # ================================================================
+    # 四、验证
+    # ================================================================
+    - name: "4/4 | 读回并核对"
+      ansible.builtin.shell: >-
+        test -f {{ auth_keys_file }} || { echo "MISSING"; exit 0; }
+        ; echo "mode=$(stat -c %a {{ auth_keys_file }})"
+        ; awk '{print $NF}' {{ auth_keys_file }}
+      register: verify_keys
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: "4/4 | 断言每把公钥都恰好出现一次"
+      ansible.builtin.assert:
+        that:
+          - verify_keys.stdout != 'MISSING'
+          - verify_keys.stdout_lines | select('search', item.split()[-1]) | list | length == 1
+        fail_msg: >-
+          公钥 {{ item.split()[-1] }} 未达到期望状态（应恰好 1 行）。
+          实际输出：{{ verify_keys.stdout }}
+          回滚：把 {{ (key_results.results | selectattr('backup_file', 'defined') | map(attribute='backup_file') | list | first) | default('authorized_keys 的 .bak') }} 覆盖回去
+        success_msg: "公钥 {{ item.split()[-1] }} 已就位，且只有一行。"
+      loop: "{{ authorized_keys }}"
+      when: not ansible_check_mode
+
+    - name: "报告 | 本次变更摘要"
+      ansible.builtin.debug:
+        msg:
+          - "运行模式  : {{ '演练（--check）' if ansible_check_mode else '实际执行' }}"
+          - "变更把数  : {{ key_results.results | selectattr('changed', 'defined') | selectattr('changed') | list | length }}"
+          - "备份文件  : {{ (key_results.results | selectattr('backup_file', 'defined') | map(attribute='backup_file') | list) | default([], true) }}"
+          - "⚠️ 本 playbook 只确保存在，不删除多余公钥（见文件头说明）"

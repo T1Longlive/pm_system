@@ -104,18 +104,27 @@ installed_ansible_version() {
   printf '%s\n' "$version"
 }
 
+# ----------------------------------------------------------------------
+# 🔴 为什么「装 python3.11」这件事必须留在这里，而不做成 playbook
+# ----------------------------------------------------------------------
+# 这是个**循环依赖**：跑 playbook 需要 Ansible，Ansible 需要较新的解释器。
+# 所以「解释器本身」永远只能由引导脚本负责 —— 它不可能被它自己要跑的
+# playbook 管理。把它写成 playbook 是逻辑上自洽不了的。
+#
+# 本机默认的 python3 是 3.6.8（Alinux3 自带），它只能配到 ansible-core 2.11
+# （2021 年发布、2022 年即 EOL），所以必须另装一个较新的解释器。
+# 下面尝试自动安装 —— 这一步的意义是：
+#   **在一台全新的机器上，只要仓库在手，一条命令就能把环境准备好。**
+# 不想让它自动装包，可以先手工装好再跑本脚本（届时这段会被跳过）。
 if ! INTERPRETER="$(choose_interpreter)"; then
-  cat >&2 <<'EOF'
-[bootstrap] ERROR: 找不到 python3.11 / 3.12 / 3.13。
-
-  本机默认 python3 是 3.6.8，它只能配到 ansible-core 2.11
-  （2021 年发布，2022 年即 EOL），所以必须另装一个较新的解释器：
-
-      dnf install -y python3.11 python3.11-pip
-
-  装完再跑一次本脚本即可（本脚本幂等，重复执行安全）。
-EOF
-  exit 1
+  log "未找到 python3.11 / 3.12 / 3.13 —— 尝试自动安装 python3.11"
+  command -v dnf >/dev/null 2>&1 \
+    || die "本机没有 dnf，无法自动安装。请手工装好 python3.11/3.12/3.13 后重跑本脚本。"
+  dnf install -y python3.11 python3.11-pip \
+    || die "dnf 安装 python3.11 失败。请手工安装后重跑。"
+  INTERPRETER="$(choose_interpreter)" \
+    || die "装完之后仍未找到 python3.11，请人工检查。"
+  log "已安装：$("$INTERPRETER" --version 2>&1)"
 fi
 
 CONSTRAINT="$(constraint_for "$INTERPRETER")"
@@ -183,17 +192,24 @@ esac
 
 cat <<'EOF'
 
-[bootstrap] 完成。接下来 —— 先演练，后执行，最后验幂等：
+[bootstrap] 完成。
 
-  cd /root/pm-system/infra/ansible
+playbook 分两类，**目录名就是安全等级**：
+    playbooks/audit/   只读 —— 只采集与审计，不改动系统。随时可跑。
+    playbooks/apply/   会改系统 —— 必须「先演练、后执行」，且跑第二遍必须 changed=0。
 
-  # 1) 只读演练：看清楚将要改什么，一个字节都不写
-  /root/.ansible-venv/bin/ansible-playbook -i inventory.ini --check --diff playbooks/<某个>.yml
+  只读探针（随便跑）：
+      cd /root/pm-system/infra/ansible
+      /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/audit/00-baseline.yml
+      /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/audit/02-log-audit.yml
+      /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/audit/03-disk-audit.yml
 
-  # 2) 真正执行
-  /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/<某个>.yml
+  会改系统的（照这个三步走）：
+      /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/<名字>.yml --check --diff   # ① 演练
+      /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/<名字>.yml                 # ② 执行
+      /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/<名字>.yml                 # ③ 幂等验收
 
-  # 3) 幂等验收：再跑一次必须 changed=0
-  /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/<某个>.yml
+  编号不连续是**有意的**：数字 = 加入仓库的先后顺序，是稳定引用；
+  重新编号会让历史提交、文档、记忆里的路径全部对不上。
 
 EOF

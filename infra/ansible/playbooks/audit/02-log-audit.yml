@@ -27,7 +27,7 @@
 #
 # 运行：
 #   cd /root/pm-system/infra/ansible
-#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/02-log-audit.yml
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/audit/02-log-audit.yml
 # ======================================================================
 
 - name: 审计日志占用（只读）

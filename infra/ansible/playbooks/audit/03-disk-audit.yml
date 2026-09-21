@@ -44,7 +44,7 @@
 #
 # 运行：
 #   cd /root/pm-system/infra/ansible
-#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/03-disk-audit.yml
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/audit/03-disk-audit.yml
 # ======================================================================
 
 - name: 审计磁盘占用（只读，纯文件系统路径）

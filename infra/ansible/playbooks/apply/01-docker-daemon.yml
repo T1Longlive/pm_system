@@ -70,11 +70,11 @@
 #   第一步（只读演练，一个字节都不写）：
 #     cd /root/pm-system/infra/ansible
 #     /root/.ansible-venv/bin/ansible-playbook -i inventory.ini \
-#         playbooks/01-docker-daemon.yml --check --diff
+#         playbooks/apply/01-docker-daemon.yml --check --diff
 #
 #   第二步（确认变更清单无误后，真正执行）：
 #     /root/.ansible-venv/bin/ansible-playbook -i inventory.ini \
-#         playbooks/01-docker-daemon.yml
+#         playbooks/apply/01-docker-daemon.yml
 #
 #   第三步（验证幂等 —— 这是 IaC 的验收标准）：
 #     再跑一次必须 changed=0，且不产生新的备份文件

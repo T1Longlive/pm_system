@@ -23,7 +23,7 @@
 # 在服务器上运行
 # --------------
 #   cd /root/pm-system/infra/ansible
-#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/00-baseline.yml
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/audit/00-baseline.yml
 # ======================================================================
 
 - name: 采集 pm-system 服务器现状（只读）

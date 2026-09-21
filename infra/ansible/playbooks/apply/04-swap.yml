@@ -1,0 +1,167 @@
+---
+# ======================================================================
+# apply/04-swap.yml —— 收敛主机 swap 配置
+# ----------------------------------------------------------------------
+# 为什么有这个文件
+# ----------------
+# 2026-09-21 的 OOM 雪崩之后，是**手工**执行 fallocate/mkswap/swapon 加的
+# 这 2 GiB swap，并手工往 /etc/fstab 追加了一行。
+# 而"手工做的变更没有代码记录"正是 IaC 要消灭的东西 —— 换台机器就重建不出来。
+# 本文件把它补回来。
+#
+# 定位：swap 不"省内存"，它是**缓冲垫** ——
+#   把"内存不够就直接被内核杀掉"变成"先慢一点、拿磁盘顶一下"。
+#   宁可慢，也不要被 OOM 杀掉。
+#
+# 🔴 幂等怎么保证（这是本文件的核心）
+#   · 创建：`stat` 判断文件是否存在，不存在才走整个创建块
+#   · 启用：先读 `swapon --show`，已在列表里就不重复 swapon
+#   · fstab：`lineinfile` + `regexp`，重复跑不会追加第二行
+#   所以跑第二遍应当 changed=0。
+#
+# 🔴 /etc/fstab 是"改错了会开不了机"的文件，所以：
+#   · 用 `backup: true` 先备份（出问题一条 cp 就能退回去）
+#   · 只追加一行格式固定的内容，不用模板整文件覆盖
+#   · 改完读回来断言"恰好一行"，多一行少一行都算失败
+#   刻意**不加** lineinfile 的 `validate:`：findmnt --verify 会连带校验
+#   其它既有条目，任何一个历史遗留问题都会让我们的编辑失败 —— 假阳性。
+#
+# 执行方式（先演练后执行，与其它 apply/ 下的 playbook 一致）：
+#   cd /root/pm-system/infra/ansible
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/04-swap.yml --check --diff
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/04-swap.yml
+#   # 再跑一次必须 changed=0
+# ======================================================================
+
+- name: 收敛主机 swap 配置
+  hosts: pm_servers
+  # gather_facts 兼任「被管端解释器能否工作」的检查点（见 00/01 的说明）
+  gather_facts: true
+  become: false
+
+  vars:
+    swap_file: /swapfile2
+    swap_size: 2G
+
+  tasks:
+
+    # ================================================================
+    # 零、前置检查
+    # ================================================================
+    - name: "零 | 断言被管端 Python 在 ansible-core 的支持区间内"
+      ansible.builtin.assert:
+        that:
+          - ansible_python_version is version('3.8', '>=')
+        fail_msg: >-
+          被管端 Python 是 {{ ansible_python_version }}，低于 ansible-core 2.19
+          要求的 3.8。模块会在被管端静默失败、只留下空 stdout。
+          修法：把 inventory.ini 的 ansible_python_interpreter 指向
+          /usr/bin/python3.11。
+        success_msg: "被管端 Python {{ ansible_python_version }}，在支持区间内。"
+
+    # ================================================================
+    # 一、先看清楚现状，并说明"将会做什么"
+    # ================================================================
+    - name: "1/5 | 读取当前已启用的 swap"
+      ansible.builtin.command: swapon --show=NAME,SIZE --noheadings
+      register: swap_now
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: "1/5 | 检查 swap 文件是否存在"
+      ansible.builtin.stat:
+        path: "{{ swap_file }}"
+      register: swap_stat
+
+    - name: "1/5 | 本次将要做的事（--check 下也能看清楚）"
+      ansible.builtin.debug:
+        msg:
+          - "swap 文件 {{ swap_file }} 存在 : {{ swap_stat.stat.exists }}"
+          - "当前已启用的 swap :"
+          - "{{ swap_now.stdout_lines | default([]) }}"
+          - >-
+            {{ '→ 无需变更，已是期望状态' if (swap_stat.stat.exists and swap_file in (swap_now.stdout | default('')))
+               else '→ 将创建/启用 ' ~ swap_size ~ ' 的 swap 并写入 fstab' }}
+
+    # ================================================================
+    # 二、创建 swap 文件（仅在不存在时）
+    # ================================================================
+    # 用 block + when 把"创建三连"圈在一起：
+    #   mkswap 本身不幂等（重复执行会重写 swap 签名），
+    #   所以必须由"文件不存在"这个条件把它整体挡住。
+    - name: "2/5 | 创建并初始化 swap 文件"
+      when: not swap_stat.stat.exists
+      block:
+        - name: "2/5 | 分配文件（fallocate）"
+          ansible.builtin.command: fallocate -l {{ swap_size }} {{ swap_file }}
+          register: fallocate_result
+          changed_when: fallocate_result.rc == 0
+
+        - name: "2/5 | 收紧权限到 0600"
+          ansible.builtin.file:
+            path: "{{ swap_file }}"
+            owner: root
+            group: root
+            mode: "0600"
+
+        - name: "2/5 | 格式化为 swap（mkswap）"
+          ansible.builtin.command: mkswap {{ swap_file }}
+          register: mkswap_result
+          changed_when: mkswap_result.rc == 0
+
+    # ================================================================
+    # 三、启用 swap
+    # ================================================================
+    - name: "3/5 | 启用 swap（已启用则跳过）"
+      ansible.builtin.command: swapon {{ swap_file }}
+      when: swap_file not in (swap_now.stdout | default(''))
+      register: swapon_result
+      changed_when: swapon_result.rc == 0
+
+    # ================================================================
+    # 四、写入 fstab（否则重启后丢失）
+    # ================================================================
+    - name: "4/5 | 写入 /etc/fstab（幂等 + 备份）"
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: '^\s*{{ swap_file }}\s'
+        line: "{{ swap_file }} none swap sw 0 0"
+        state: present
+        # 🔴 fstab 改错会导致开机异常，所以永远先备份
+        backup: true
+      register: fstab_result
+
+    # ================================================================
+    # 五、验证
+    # ================================================================
+    - name: "5/5 | 读回 fstab 与 swap 状态"
+      ansible.builtin.shell: >-
+        swapon --show=NAME,SIZE --noheadings;
+        echo '---fstab---';
+        grep -c "^{{ swap_file }}" /etc/fstab
+      register: verify_state
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: "5/5 | 断言 swap 已启用且 fstab 恰好一行"
+      ansible.builtin.assert:
+        that:
+          - swap_file in verify_state.stdout
+          - verify_state.stdout_lines[-1] | trim == '1'
+        fail_msg: >-
+          swap 未达到期望状态。输出：{{ verify_state.stdout }}
+          回滚：把 {{ fstab_result.backup_file | default('fstab 的 .bak') }} 覆盖回 /etc/fstab
+        success_msg: "swap 已启用，fstab 恰好一行。"
+      when: not ansible_check_mode
+
+    - name: "报告 | 本次变更摘要"
+      ansible.builtin.debug:
+        msg:
+          - "运行模式    : {{ '演练（--check）' if ansible_check_mode else '实际执行' }}"
+          - "创建文件    : {{ '是' if (fallocate_result is defined and fallocate_result.changed) else '否（已存在）' }}"
+          - "启用 swap   : {{ '是' if (swapon_result is defined and swapon_result.changed) else '否（已启用）' }}"
+          - "fstab 变更  : {{ '是' if fstab_result.changed else '否（已是期望状态）' }}"
+          - "fstab 备份  : {{ fstab_result.backup_file | default('（未产生，说明没有变更）') }}"
+          - "swap 总量    : {{ ansible_swaptotal_mb }} MiB"
