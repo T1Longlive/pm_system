@@ -149,7 +149,13 @@
           - "{{ layer_count.stdout_lines | default([]) }}"
           - "应用相关 tag 数: {{ tag_count.stdout | default('?') | trim }}（≈ 部署过多少次）"
           - "tag 清单（最多 30 条）："
-          - "{{ tag_list.stdout_lines | default([])[:30] }}"
+          # 🔴 切片必须包在括号里：(expr)[:30]
+          #    写成 expr | default([])[:30] 会直接报 Jinja 语法错误：
+          #    "expected token 'end of print statement', got '['"
+          #    —— Jinja2 不允许在 filter 调用之后直接接下标。
+          #    这个 bug 是靠 drift-check.sh 定时跑才暴露出来的：该剧本 failed=1，
+          #    而平时手工跑只看开头几行，容易漏掉结尾的失败。
+          - "{{ (tag_list.stdout_lines | default([]))[:30] }}"
           - "↑ 层数远大于 tag 数说明层被共享复用，属正常"
 
     # ================================================================

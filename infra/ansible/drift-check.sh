@@ -46,7 +46,9 @@ AUDIT_PLAYBOOKS=(
   "playbooks/audit/03-disk-audit.yml"
 )
 
-log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG_FILE"; }
+# 进度与结论一律走 stderr + 日志文件；stdout 只用来传递机器可读的返回值（changed 计数）。
+# 这样调用方可以 `changed=$(run_playbook ... | tail -1)` 而不被日志污染。
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG_FILE" >&2; }
 
 # 从 PLAY RECAP 那一行里抠出某个计数（ok / changed / failed）
 # 形如：pm-ecs  : ok=15   changed=2    unreachable=0    failed=0
@@ -74,7 +76,7 @@ run_playbook() {
 
   if [ "$rc" -ne 0 ] || [ -z "$recap" ] || [ "$failed" -gt 0 ]; then
     log "  $mode $pb -> ERROR (exit=$rc, failed=$failed)"
-    printf '%s\n' "$out" | tee -a "$LOG_FILE" >/dev/null
+    printf '%s\n' "$out" | tee -a "$LOG_FILE" >&2
     return 2
   fi
 
@@ -102,7 +104,8 @@ DRIFTS=""
 log "① 只读探针（audit/）"
 for pb in "${AUDIT_PLAYBOOKS[@]}"; do
   [ -f "$pb" ] || { log "  SKIP $pb（文件不存在）"; continue; }
-  if ! run_playbook "$pb" "AUDIT" >/dev/null; then
+  # 探针的返回值不关心，但它的进度与报错要能看到 → 走 stderr，不污染 stdout
+  if ! run_playbook "$pb" "AUDIT" >&2; then
     ERRORS=$((ERRORS + 1))
   fi
 done
@@ -136,7 +139,7 @@ fi
 
 if [ -n "$DRIFTS" ]; then
   log "RESULT: DRIFT DETECTED —— 以下剧本报告「需要变更」，即线上已偏离期望状态："
-  printf "$DRIFTS" | tee -a "$LOG_FILE"
+  printf "$DRIFTS" | tee -a "$LOG_FILE" >&2
   log "  处理：人工确认后跑对应 apply 剧本收敛（演练 → 执行 → 幂等），或改回期望状态。"
   log "  注意：也可能是有人改了仓库里的期望状态但还没执行 —— 先看 --check 的 diff 再决定方向。"
   log "===== drift-check 结束（exit 1）====="
