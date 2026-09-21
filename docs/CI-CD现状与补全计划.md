@@ -1286,8 +1286,8 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 - [x] ~~按需：JVM 堆上限 / 加 swap / 升级 ECS 到 4G（§6.4）~~ —— **2026-09-21 事故驱动完成了前三项**（JVM 堆上限 + MySQL 参数 + swap + `mem_limit`）。升级 ECS 仍可选，但余量已回到 830 MiB，不急
 - [ ] 🔴 **轮换服务器 root 密码** —— 2026-09-21 排查事故时它曾以明文出现在聊天记录里。SSH 已改为专用密钥（注释 `ai-agent`）认证，密码不再是必需
 - [x] ~~给流水线加路径过滤~~ —— 查证后确认 **Gitee Go 个人版没有这个能力**（那是企业版的功能），改在 `scripts/deploy.sh` 里加路径守卫（§6.4，提交 `dfd6821`）
-- [ ] **Cloudland 的 `deploy.sh` 同样加路径守卫** —— pm-system 已加，Cloudland 还没做
-- [ ] 决策：要不要加 `-XX:+ExitOnOutOfMemoryError` —— 加了之后 OOM 会直接退出 → 容器重启 → 健康检查立刻发现（fail-fast 换可观测性）。可用 `JAVA_TOOL_OPTIONS` 加，**无需重建镜像**
+- [x] ~~**Cloudland 的 `deploy.sh` 同样加路径守卫**~~ —— **已完成**（`add7fe7`），线上已打印判定记录
+- [x] ~~决策：要不要加 `-XX:+ExitOnOutOfMemoryError`~~ —— **已加到两个项目**（走 `JAVA_TOOL_OPTIONS`，无需重建镜像）。OOM 时进程直接退出 → 容器重启 → 健康检查发现，即 fail-fast 换可观测性
 - [ ] 观察几天：`docker stats` 看两个 backend 是否稳定在 180 MiB 附近。持续爬升 ⇒ 额度偏小或有内存泄漏
 - [x] ~~上线后立即修改初始管理员密码~~ —— 已改
 - [ ] Cloudland 首页标语统一：`HomeView.vue` 第 13 行英文版、`LoginForm.vue` 第 10/45 行仍是旧文案
