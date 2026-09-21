@@ -9,9 +9,29 @@
 #   2) 优先 reload 而非 restart → 见下方专门一节
 #   3) 改完证明副作用为零       → 断言所有容器都没有被重启
 #
-# ----------------------------------------------------------------------
+# ======================================================================
+# 🔴 本 playbook 的纪律：只收「可热加载」的键
+# ======================================================================
+# Docker 能热加载（SIGHUP）的选项是**固定的一个短清单**：
+#   debug / labels / live-restore / max-concurrent-{downloads,uploads} /
+#   max-download-attempts / default-runtime / runtimes /
+#   authorization-plugins / insecure-registries / registry-mirrors /
+#   shutdown-timeout / features
+#
+# 其余全部需要重启 dockerd —— **包括 log-driver 与 log-opts**。
+# 更麻烦的是：reload 一个不在清单里的选项会**静默失败**，
+# 守护进程接受信号、保留旧值，读起来就像"这个设置什么也没做"。
+#
+# ⇒ 所以这里只放清单内的键。好处是本 playbook 有一条干净的保证：
+#   **跑完当场就能验证每一条都真的生效了。**
+#   需要重启才能生效的配置（如容器日志轮转）另开 playbook 单独处理。
+#
+# 顺带：本次加进来的 live-restore 正是"未来做受控重启"的安全垫 ——
+# 开了它，重启 dockerd 时容器不会跟着死。
+#
+# ======================================================================
 # 期望状态从哪来
-# ----------------------------------------------------------------------
+# ======================================================================
 # 由 00-baseline.yml 采集到的**事实**（不是猜测）：
 #   /etc/docker/daemon.json 里的 registry-mirrors 有 3 条：
 #     · https://docker.mirrors.ustc.edu.cn   ← 已停止服务，DNS 不再解析
@@ -23,21 +43,18 @@
 #   所以死源不会让拉取失败，但每次拉取都要在它身上白等一次。
 #   属于"不致命、但持续漏油"的配置 —— 正是 IaC 最适合收拾的那类问题。
 #
-# ----------------------------------------------------------------------
+# ======================================================================
 # 🔴 为什么必须用 reload，不能用 restart
-# ----------------------------------------------------------------------
+# ======================================================================
 # `systemctl restart docker` 会**杀掉并重建所有容器**。
 # 这台机器上同时跑着 pm-system 与 Cloudland 共 8 个容器，
 # 而 00-baseline 实测 **available 内存只剩 138 MiB**。
 # 8 个容器同时冷启动（其中两个是 JVM）极可能触发 OOM Killer ——
-# 而 OOM 杀进程时**日志里往往什么都不写**，事后极难定位。
+# 而 OOM 杀进程时**日志里往往什么都不会写**，事后极难定位。
 #
-# Docker 支持 SIGHUP 热加载，`registry-mirrors` 属于可热加载的配置项。
-# 所以 `systemctl reload docker` 既能让新配置生效，又**不触碰任何容器**。
-#
-# ----------------------------------------------------------------------
+# ======================================================================
 # 🔴 check 模式的两个陷阱（本文件的写法就是解法）
-# ----------------------------------------------------------------------
+# ======================================================================
 # trap 1：`command` / `shell` 任务在 --check 下**默认被跳过**。
 #   于是"前置读取"拿不到值，后面引用它的断言会因 undefined 直接报错，
 #   演练根本跑不完。
@@ -47,9 +64,9 @@
 #   （读到的还是旧内容，断言"死源已移除"会挂）。
 #   → 解法：事后验证任务加 `when: not ansible_check_mode`。
 #
-# ----------------------------------------------------------------------
+# ======================================================================
 # 执行方式
-# ----------------------------------------------------------------------
+# ======================================================================
 #   第一步（只读演练，一个字节都不写）：
 #     cd /root/pm-system/infra/ansible
 #     /root/.ansible-venv/bin/ansible-playbook -i inventory.ini \
@@ -60,9 +77,7 @@
 #         playbooks/01-docker-daemon.yml
 #
 #   第三步（验证幂等 —— 这是 IaC 的验收标准）：
-#     /root/.ansible-venv/bin/ansible-playbook -i inventory.ini \
-#         playbooks/01-docker-daemon.yml
-#     # 再跑一次必须 changed=0，且不产生新的备份文件
+#     再跑一次必须 changed=0，且不产生新的备份文件
 # ======================================================================
 
 - name: 收敛 Docker daemon 配置到期望状态
@@ -73,12 +88,19 @@
   vars:
     docker_daemon_json: /etc/docker/daemon.json
 
-    # ---- 期望状态：只保留实测可用的镜像源 ----
-    # 若日后从阿里云控制台拿到本 ECS 的专属加速地址
-    # （形如 https://<你的ID>.mirror.aliyuncs.com），
-    # 把它加到这个列表**最前面** —— Docker 按顺序尝试，先命中的更快。
-    docker_registry_mirrors:
-      - https://docker.1panel.live
+    # ---- 期望状态：只放**可热加载**的键 ----
+    docker_daemon_config:
+      # 只保留实测可用的镜像源。
+      # 若日后从阿里云控制台拿到本 ECS 的专属加速地址
+      # （形如 https://<你的ID>.mirror.aliyuncs.com），
+      # 把它加到列表**最前面** —— Docker 按顺序尝试，先命中的更快。
+      registry-mirrors:
+        - https://docker.1panel.live
+      # 让容器在 dockerd 重启期间存活（默认是 false）。
+      # 这是给"未来必须重启才能生效的配置"（如 log-opts）铺的安全垫：
+      # 没有它，重启 dockerd = 8 个容器全部冷启动 = 138 MiB 下的 OOM 赌局。
+      # 注意它只覆盖 daemon 重启，不覆盖网络/存储驱动的变更 —— 那仍需重建容器。
+      live-restore: true
 
   handlers:
     # handler 只在"有任务通知它"时才执行。
@@ -86,7 +108,6 @@
     # 第二次运行 changed=0，也不会白白热加载一次 Docker。
     #
     # `when: not ansible_check_mode`：演练时绝不能让 Docker 真的被 reload。
-    # （systemd 模块本身通常尊重 check 模式，但这条护栏是零成本的保险。）
     - name: 热加载 Docker 配置
       ansible.builtin.systemd:
         name: docker
@@ -141,7 +162,8 @@
       ansible.builtin.copy:
         # 用 to_nice_json 从数据结构生成，从根上保证是合法 JSON ——
         # 手写 JSON 字符串一旦写错，Docker 会直接起不来。
-        content: "{{ {'registry-mirrors': docker_registry_mirrors} | to_nice_json }}\n"
+        # （原文件就是手工追加出来的：缩进歪斜、最后一个数组元素直接接 ]）
+        content: "{{ docker_daemon_config | to_nice_json }}\n"
         dest: "{{ docker_daemon_json }}"
         owner: root
         group: root
@@ -170,9 +192,13 @@
       check_mode: false
       when: not ansible_check_mode
 
-    - name: "验证 | 读取 Docker 实际生效的镜像源"
-      ansible.builtin.shell: docker info | grep -A5 'Registry Mirrors'
-      register: docker_mirrors_now
+    # 这一项是本 playbook 纪律的检验点：
+    # 清单内的键 reload 之后**应当**立刻反映在 docker info 里。
+    # 若没反映出来，说明我们对"可热加载清单"的理解有误 —— 那要立刻知道。
+    - name: "验证 | 读取 Docker 实际生效的镜像源与 live-restore"
+      ansible.builtin.shell: >-
+        docker info | grep -iA5 -e 'Registry Mirrors' -e 'Live Restore'
+      register: docker_info_now
       changed_when: false
       failed_when: false
       check_mode: false
@@ -187,14 +213,27 @@
       check_mode: false
       when: not ansible_check_mode
 
-    - name: "验证 | 断言死掉的镜像源已被移除"
+    - name: "验证 | 断言 daemon.json 内容符合期望"
       ansible.builtin.assert:
         that:
           - "'ustc' not in daemon_after.stdout"
           - "'tencentyun' not in daemon_after.stdout"
           - "'docker.1panel.live' in daemon_after.stdout"
+          - "'live-restore' in daemon_after.stdout"
         fail_msg: "写入后的 daemon.json 内容不符合期望：{{ daemon_after.stdout }}"
-        success_msg: "期望的镜像源已写入，两条不可用源已移除。"
+        success_msg: "期望内容已写入：镜像源已收敛，live-restore 已开启。"
+      when: not ansible_check_mode
+
+    - name: "验证 | 断言热加载真的生效（而不只是改了文件）"
+      ansible.builtin.assert:
+        that:
+          - "'docker.1panel.live' in docker_info_now.stdout"
+          - "'Live Restore Enabled: true' in docker_info_now.stdout"
+        fail_msg: >-
+          docker info 没有反映新配置 —— 说明 reload 没起作用。
+          输出：{{ docker_info_now.stdout }}
+          回滚：把 daemon.json 的 .bak 覆盖回去，再 systemctl reload docker
+        success_msg: "docker info 已反映新配置：热加载确实生效了，不只是改了文件。"
       when: not ansible_check_mode
 
     # 这是本 playbook 最重要的一条断言：
@@ -225,4 +264,4 @@
           - "改动前        : {{ daemon_before.stdout | default('（读取失败）') }}"
           - "改动后        : {{ daemon_after.stdout | default('（演练模式未执行）') }}"
           - "Docker 实际生效:"
-          - "{{ docker_mirrors_now.stdout_lines | default(['（演练模式未执行）']) }}"
+          - "{{ docker_info_now.stdout_lines | default(['（演练模式未执行）']) }}"

@@ -1,0 +1,177 @@
+---
+# ======================================================================
+# 02-log-audit.yml —— 只读审计：日志到底占了多少，涨得多快
+# ----------------------------------------------------------------------
+# 为什么需要这一步，而不是直接去改 daemon.json？
+# ----------------------------------------------------------------------
+# 由 `01-docker-daemon.yml` 的实践 + 官方文档确认了一个硬约束：
+#
+#   🔴 `log-driver` 与 `log-opts` **不在可热加载清单里**，必须重启 dockerd。
+#      而"reload 一个不在清单里的选项会**静默失败**" ——
+#      守护进程接受 SIGHUP、保留旧值，读起来就像"这个设置没生效"。
+#
+# 也就是说：修容器日志轮转 = 一次完整的 Docker 重启。
+# 而这台机器上跑着 8 个容器、available 内存只剩 138 MiB，
+# 两个 JVM 同时冷启动极易触发 OOM Killer（且 OOM 时日志里什么都不写）。
+#
+# ⇒ **不能在没测量过之前就动它。**
+#    本 playbook 只回答三个问题：
+#      1) 现在有多少日志？（各容器 json.log 的体积）
+#      2) 关不关得住？（现有 logrotate / 容器 LogConfig 的实际配置）
+#      3) 值不值得为它安排一次重启？
+#
+# 这个 playbook 是**可以用时间维度复跑**的 —— 隔几天再跑一次，
+# 两次输出的差值就是增长速度。这是判断"急不急"的唯一可靠依据。
+#
+# 本文件不含任何写操作（与 00-baseline 一样是纯探针）。
+#
+# 运行：
+#   cd /root/pm-system/infra/ansible
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/02-log-audit.yml
+# ======================================================================
+
+- name: 审计日志占用（只读）
+  hosts: pm_servers
+  gather_facts: false
+  become: false
+
+  vars:
+    docker_root: /var/lib/docker
+    app_dir: /root/pm-system
+
+  tasks:
+
+    # ================================================================
+    # 一、守护进程当前的日志配置
+    # ================================================================
+    - name: "1/5 | Docker 守护进程的日志与存储配置"
+      ansible.builtin.shell: >-
+        docker info --format
+        'Logging Driver={% raw %}{{.LoggingDriver}}{% endraw %}
+        | Storage Driver={% raw %}{{.Driver}}{% endraw %}
+        | Docker Root Dir={% raw %}{{.DockerRootDir}}{% endraw %}'
+      register: docker_info_subset
+      changed_when: false
+      failed_when: false
+
+    - name: "1/5 | 守护进程配置（输出）"
+      ansible.builtin.debug:
+        var: docker_info_subset.stdout_lines
+
+    - name: "1/5 | daemon.json 全文"
+      ansible.builtin.command: cat /etc/docker/daemon.json
+      register: daemon_json
+      changed_when: false
+      failed_when: false
+
+    - name: "1/5 | daemon.json 里有没有 log-opts"
+      ansible.builtin.debug:
+        msg:
+          - "{{ '✅ 已配置 log-opts —— 容器日志有上限' if 'log-opts' in (daemon_json.stdout | default('')) else '🔴 没有 log-opts —— json-file 驱动默认不轮转，容器日志无上限增长' }}"
+          - "{{ daemon_json.stdout | default('（读取失败）') }}"
+
+    # ================================================================
+    # 二、每个容器实际生效的日志配置
+    # ================================================================
+    # 注意：改 daemon.json 的 log-opts **只影响之后新建的容器**，
+    # 已存在的容器会保留它创建时的配置。所以必须逐个看容器。
+    - name: "2/5 | 各运行中容器实际生效的日志配置"
+      ansible.builtin.shell: >-
+        docker ps -q | xargs docker inspect
+        -f {% raw %}'{{.Name}}  driver={{.HostConfig.LogConfig.Type}}  opts={{.HostConfig.LogConfig.Config}}'{% endraw %}
+        | sort
+      register: container_log_config
+      changed_when: false
+      failed_when: false
+
+    - name: "2/5 | 容器日志配置（输出）"
+      ansible.builtin.debug:
+        var: container_log_config.stdout_lines
+
+    # ================================================================
+    # 三、日志文件到底占了多少 —— 这是"急不急"的核心数据
+    # ================================================================
+    - name: "3/5 | 各容器日志文件体积（Top 10）"
+      ansible.builtin.shell: >-
+        find {{ docker_root }}/containers -name '*-json.log'
+        -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -10
+      register: container_logs
+      changed_when: false
+      failed_when: false
+
+    - name: "3/5 | 单容器日志占用的合计"
+      ansible.builtin.shell: >-
+        find {{ docker_root }}/containers -name '*-json.log' -printf '%s\n' 2>/dev/null
+        | awk '{s+=$1} END {printf "%.1f MiB（%d 个文件）\n", s/1024/1024, NR}'
+      register: container_log_total
+      changed_when: false
+      failed_when: false
+
+    - name: "3/5 | /var/lib/docker 总占用"
+      ansible.builtin.shell: du -sh {{ docker_root }} 2>/dev/null
+      register: docker_root_size
+      changed_when: false
+      failed_when: false
+
+    - name: "3/5 | 磁盘总水位"
+      ansible.builtin.command: df -h /
+      register: disk_now
+      changed_when: false
+      failed_when: false
+
+    - name: "3/5 | 日志占用（输出）"
+      ansible.builtin.debug:
+        msg:
+          - "容器日志合计 : {{ container_log_total.stdout | default('（统计失败）') | trim }}"
+          - "Docker 数据目录: {{ docker_root_size.stdout | default('（统计失败）') | trim }}"
+          - "磁盘水位      : {{ disk_now.stdout_lines | default([]) }}"
+          - "各自体积 Top10（字节 / 路径）:"
+          - "{{ container_logs.stdout_lines | default(['（未找到 json.log）']) }}"
+
+    # ================================================================
+    # 四、部署脚本自己的日志（这是另一条独立的增长线）
+    # ================================================================
+    # 这条与容器日志是**两套不同机制**，别混：
+    #   · 容器日志 → 由 Docker 的 log driver 管（daemon.json 的 log-opts）
+    #   · 部署日志 → 由 logrotate 管（/etc/logrotate.d/ 下的配置）
+    - name: "4/5 | 部署日志文件体积"
+      ansible.builtin.shell: ls -lh /var/log/pm-system-* 2>/dev/null || echo "（没有 pm-system-* 日志文件）"
+      register: deploy_logs
+      changed_when: false
+      failed_when: false
+
+    - name: "4/5 | /var/log 下体积最大的 10 个文件"
+      ansible.builtin.shell: >-
+        find /var/log -maxdepth 2 -type f -printf '%s\t%p\n' 2>/dev/null
+        | sort -rn | head -10
+      register: var_log_top
+      changed_when: false
+      failed_when: false
+
+    - name: "4/5 | 是否已有本项目的 logrotate 配置"
+      ansible.builtin.shell: >-
+        ls -1 /etc/logrotate.d/ | grep -i -e pm-system -e cloudland
+        || echo "（无：本项目日志目前完全没有轮转策略）"
+      register: logrotate_pm
+      changed_when: false
+      failed_when: false
+
+    - name: "4/5 | 部署日志（输出）"
+      ansible.builtin.debug:
+        msg:
+          - "部署日志      : {{ deploy_logs.stdout_lines | default([]) }}"
+          - "logrotate 配置: {{ logrotate_pm.stdout_lines | default([]) }}"
+          - "/var/log 体积 Top10（字节 / 路径）:"
+          - "{{ var_log_top.stdout_lines | default([]) }}"
+
+    # ================================================================
+    # 五、结论提示
+    # ================================================================
+    - name: "5/5 | 判断建议（需你根据上面的数字拍板）"
+      ansible.builtin.debug:
+        msg:
+          - "容器日志合计若 < 500 MiB 且磁盘水位 < 70%  → 不急，先把 log-opts 写进期望状态，等下次自然重启生效"
+          - "容器日志合计若持续增长且磁盘逼近 80%    → 需要安排一次受控重启，但**必须先开 live-restore**"
+          - "🔑 关键前置：live-restore 是**可热加载**的，而 log-opts 不是。"
+          - "   所以正确顺序是：先 reload 开启 live-restore（零停机）→ 再重启 dockerd（此时容器不会停）"
+          - "   详见 playbooks/README 或 MEMORY.md 的 IaC 一节"
