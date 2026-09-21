@@ -1,0 +1,210 @@
+---
+# ======================================================================
+# 00-baseline.yml —— 只读采集这台服务器的现状
+# ----------------------------------------------------------------------
+# 为什么第一个 playbook 是「只读」的
+# ---------------------------------
+# 「基础设施即代码」的第一条铁律：
+#   先把现状变成**可读、可比对的事实**，再谈期望状态。
+# 跳过这一步直接写 playbook，等于闭着眼睛改生产。
+#
+# 本文件不含任何写操作。所有 command / shell 任务都显式标了
+#   changed_when: false
+# 因为只读任务若被计入 changed，会污染"这次运行改了什么"这个最关键的信号。
+# （Ansible 默认把所有 command/shell 都算 changed —— 它无法知道命令做了什么，
+#   只能靠你告诉它。这就是为什么"显式声明"在这里是必须的。）
+#
+# 关于 failed_when: false
+# -----------------------
+# 采集现状时，"某文件不存在"和"命令执行失败"是两件事：
+#   前者是**有价值的事实**，不该让整个 playbook 中断。
+#   所以读类命令统一 failsafe，把结果交给后面的 debug 判断。
+#
+# 在服务器上运行
+# --------------
+#   cd /root/pm-system/infra/ansible
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/00-baseline.yml
+# ======================================================================
+
+- name: 采集 pm-system 服务器现状（只读）
+  hosts: pm_servers
+  gather_facts: true
+  become: false
+
+  vars:
+    app_dir: /root/pm-system
+    docker_daemon_json: /etc/docker/daemon.json
+    docker_login_config: /root/.docker/config.json
+
+  tasks:
+
+    # ================================================================
+    # 一、主机事实（由 gather_facts 自动收集，无需额外命令）
+    # ================================================================
+    - name: "[1/6] 主机与运行时"
+      ansible.builtin.debug:
+        msg:
+          - "主机名    : {{ ansible_hostname }}"
+          - "发行版    : {{ ansible_distribution }} {{ ansible_distribution_version }} / {{ ansible_architecture }}"
+          - "内核      : {{ ansible_kernel }}"
+          - "CPU 核数  : {{ ansible_processor_vcpus }}"
+          - "内存总量  : {{ (ansible_memtotal_mb / 1024) | round(2) }} GiB"
+          - "Swap 总量 : {{ (ansible_swaptotal_mb / 1024) | round(2) }} GiB"
+          - "Python    : {{ ansible_python_version }}"
+          - "时区      : {{ ansible_date_time.tz }}"
+
+    # ================================================================
+    # 二、资源水位 —— 这台机器的核心瓶颈，每次部署前都值得看一眼
+    # ================================================================
+    - name: "[2/6] 当前内存与 Swap 占用"
+      ansible.builtin.command: free -m
+      register: mem_snapshot
+      changed_when: false
+
+    - name: "[2/6] 当前内存与 Swap 占用（输出）"
+      ansible.builtin.debug:
+        var: mem_snapshot.stdout_lines
+
+    - name: "[2/6] 根分区磁盘占用"
+      ansible.builtin.command: df -h /
+      register: disk_snapshot
+      changed_when: false
+
+    - name: "[2/6] 根分区磁盘占用（输出）"
+      ansible.builtin.debug:
+        var: disk_snapshot.stdout_lines
+
+    - name: "[2/6] 已监听端口"
+      ansible.builtin.shell: ss -ltnp
+      register: listening
+      changed_when: false
+      failed_when: false
+
+    - name: "[2/6] 已监听端口（输出）"
+      ansible.builtin.debug:
+        var: listening.stdout_lines
+
+    # ================================================================
+    # 三、Docker 运行时 —— 方案 B 的执行环境
+    # ================================================================
+    - name: "[3/6] Docker 版本"
+      ansible.builtin.command: docker --version
+      register: docker_version
+      changed_when: false
+      failed_when: false
+
+    - name: "[3/6] Docker Compose 版本"
+      ansible.builtin.command: docker compose version
+      register: compose_version
+      changed_when: false
+      failed_when: false
+
+    - name: "[3/6] Docker 与 containerd 服务状态"
+      ansible.builtin.shell: systemctl is-active docker containerd
+      register: docker_service
+      changed_when: false
+      failed_when: false
+
+    - name: "[3/6] 全部容器（含已停止）"
+      ansible.builtin.command: docker ps -a
+      register: containers
+      changed_when: false
+      failed_when: false
+
+    - name: "[3/6] Docker 运行汇总"
+      ansible.builtin.debug:
+        msg:
+          - "docker    : {{ docker_version.stdout | default('不可用') }}"
+          - "compose   : {{ compose_version.stdout | default('不可用') }}"
+          - "服务状态  : {{ docker_service.stdout_lines | default([]) | join(' / ') }}"
+          - "容器列表如下 ↓"
+          - "{{ containers.stdout_lines | default(['（无法列出）']) }}"
+
+    # ================================================================
+    # 四、配置与凭据 —— 只取「键名 / 注册表地址」，绝不打印任何值
+    # ================================================================
+    # 这是本 playbook 最需要注意安全的一节。
+    # .env 与 docker config.json 里都有明文密码，
+    # 而 playbook 的输出会被写进日志、贴到聊天窗口、存进 CI 记录。
+    # 所以这里**只证明"配置存在且结构正确"，不把值带出服务器**。
+    - name: "[4/6] Docker daemon 配置是否存在"
+      ansible.builtin.stat:
+        path: "{{ docker_daemon_json }}"
+      register: daemon_stat
+
+    - name: "[4/6] Docker daemon 配置内容（镜像加速器）"
+      ansible.builtin.command: cat {{ docker_daemon_json }}
+      register: daemon_content
+      changed_when: false
+      failed_when: false
+      when: daemon_stat.stat.exists
+
+    - name: "[4/6] 已登录的镜像仓库地址（只取地址，不含凭据）"
+      ansible.builtin.shell: grep -oE '"crpi[^"]*"|"registry[^"]*"' {{ docker_login_config }} | sort -u
+      register: logged_registries
+      changed_when: false
+      failed_when: false
+
+    - name: "[4/6] 部署目录 .env 的键名（只取键，不取值）"
+      ansible.builtin.shell: grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' {{ app_dir }}/.env | tr -d '=' | sort
+      register: env_keys
+      changed_when: false
+      failed_when: false
+
+    - name: "[4/6] 配置与凭据汇总"
+      ansible.builtin.debug:
+        msg:
+          - "daemon.json 存在 : {{ daemon_stat.stat.exists }}"
+          - "daemon.json 内容 : {{ daemon_content.stdout | default('（不存在或为空）') }}"
+          - "已登录镜像仓库    : {{ logged_registries.stdout_lines | default([]) }}"
+          - ".env 键名（共 {{ env_keys.stdout_lines | default([]) | length }} 个）:"
+          - "{{ env_keys.stdout_lines | default(['（读不到 .env）']) }}"
+
+    # ================================================================
+    # 五、调度与日志 —— 目前完全靠手工维护的部分
+    # ================================================================
+    - name: "[5/6] root 的定时任务"
+      ansible.builtin.command: crontab -l
+      register: cron_entries
+      changed_when: false
+      failed_when: false
+
+    - name: "[5/6] 已存在的 logrotate 配置"
+      ansible.builtin.command: ls -1 /etc/logrotate.d/
+      register: logrotate_conf
+      changed_when: false
+      failed_when: false
+
+    - name: "[5/6] 防火墙状态"
+      ansible.builtin.shell: (ufw status 2>/dev/null || firewall-cmd --state 2>/dev/null) || echo "未安装 ufw / firewalld"
+      register: firewall_state
+      changed_when: false
+      failed_when: false
+
+    - name: "[5/6] 调度与日志汇总"
+      ansible.builtin.debug:
+        msg:
+          - "定时任务    : {{ cron_entries.stdout_lines | default(['（无）']) if cron_entries.rc == 0 else '（无 crontab）' }}"
+          - "logrotate   : {{ logrotate_conf.stdout_lines | default([]) }}"
+          - "防火墙      : {{ firewall_state.stdout_lines | default([]) | join(' ') }}"
+
+    # ================================================================
+    # 六、部署目录 —— 确认我们要管的确实是这个目录
+    # ================================================================
+    - name: "[6/6] 部署目录是否存在"
+      ansible.builtin.stat:
+        path: "{{ app_dir }}"
+      register: app_dir_stat
+
+    - name: "[6/6] 部署目录内容"
+      ansible.builtin.command: ls -1 {{ app_dir }}
+      register: app_dir_content
+      changed_when: false
+      failed_when: false
+      when: app_dir_stat.stat.exists
+
+    - name: "[6/6] 部署目录汇总"
+      ansible.builtin.debug:
+        msg:
+          - "{{ app_dir }} 存在 : {{ app_dir_stat.stat.exists }}"
+          - "内容 : {{ app_dir_content.stdout_lines | default([]) }}"
