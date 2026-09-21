@@ -5,6 +5,29 @@
 # 后端 8080 / MySQL 3306 / Redis 6379 一律不做宿主机端口映射，
 # 仅在 compose 内部网络可达 —— 这是生产环境的基本原则。
 #
+# ======================================================================
+# 🔴 内存：本文件的每一项内存参数都是事故后加的，不要删
+# ----------------------------------------------------------------------
+# 2026-09-21 这台服务器发生过一次 OOM 雪崩：
+#   · 内核 OOM killer 先杀 Cloudland 的 java，再杀 MySQL，
+#     最后把 dockerd 自己（RSS 1 GB）也杀了两次
+#   · 结果 8 个容器里 7 个停摆，而 Docker 因 hasBeenManuallyStopped=true
+#     不会自动拉起它们
+#
+# 根因是**结构性超配**（数字是实测的）：
+#   宿主机           1870 MiB
+#   非容器底座       ~250 MiB（阿里云盾 / 宝塔 / Gitee runner / dockerd / containerd / journald）
+#   每套栈原占用     ~725 MiB（Java ~350 + MySQL ~360 + Redis + nginx）
+#   两套栈           1450 MiB
+#   ⇒ 1450 + 250 = 1700 MiB，对着 1870 MiB 的机器，可用余量只有 138 MiB
+#
+# 因此下面三处都做了收敛（本文件里两处，另一处见 01 号 playbook 的 swap）：
+#   1. backend 的 JAVA_TOOL_OPTIONS —— 限制 JVM 堆
+#   2. mysql 的 command            —— 缩小 InnoDB 缓冲池、关掉 performance_schema
+#   3. 宿主机加了 2 GiB swap       —— 吸收冷启动尖峰（不在本文件里）
+#
+# ⚠️ 这些不是"可选优化"。删掉它们，OOM 会再来一次。
+#
 # ⚠️ 应用镜像按 IMAGE_TAG 取 tag（值 = commit SHA），不再是 latest。
 #    正常部署走 scripts/deploy.sh（它负责计算并导出 IMAGE_TAG）。
 #    手工排查时也必须带上，否则本文件会直接报错：
@@ -38,6 +61,22 @@ services:
       PM_UPLOAD_DIR: /pm-upload
       JWT_SECRET: ${JWT_SECRET}
       TZ: Asia/Shanghai
+      # ================================================================
+      # 🔴 JVM 堆上限 —— 2026-09-21 OOM 事故的直接对策
+      # ================================================================
+      # 不加这一行时，JVM 默认取宿主内存的 1/4。对一台 1.8 GiB 的机器，
+      # 那是 ~450 MiB/进程 —— 两个后端就是 ~900 MiB 的潜在堆，
+      # 叠上两个 MySQL（各 ~360 MiB RSS）必然超配。
+      # 后果实测：内核 OOM killer 连 dockerd 一起杀了两次，7 个容器停摆。
+      #
+      # 为什么用 JAVA_TOOL_OPTIONS 而不是 JAVA_OPTS：
+      #   本镜像的 Dockerfile 用 exec 形式 ENTRYPOINT ["java","-jar",...]，
+      #   它不会经过 shell，所以 JAVA_OPTS 根本没人读。
+      #   JAVA_TOOL_OPTIONS 是 JVM 自己识别的环境变量，一定生效。
+      #
+      # -XX:+UseSerialGC：单线程 GC，不额外起 GC 工作线程（省内存与 CPU）
+      # -Xss512k：线程栈从默认 1M 降到 512k（Spring/Tomcat 线程较多）
+      JAVA_TOOL_OPTIONS: "-Xmx320m -XX:+UseSerialGC -Xss512k"
     volumes:
       # 附件持久化：容器重建不丢文件
       - pm-upload:/pm-upload
@@ -66,6 +105,21 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
       MYSQL_DATABASE: pm_system
+    # ================================================================
+    # 🔴 缩小 MySQL 的内存占用
+    # ================================================================
+    # 实测 mysqld 的 RSS 约 360 MiB，其中很大一块是：
+    #   · InnoDB 缓冲池：默认 128 MiB
+    #   · performance_schema：MySQL 8 默认开启，额外吃 100~200 MiB
+    # 本项目是个内部小系统，两者都用不满 —— 关掉后这两个后端仍是完整的。
+    #
+    # ⚠️ 两个都是**启动参数**，改了必须重建容器才生效（不是热改）。
+    #    它们只影响内存分配，**不触碰任何数据**。
+    # ⚠️ 这里刻意不加 --skip-name-resolve：它会让基于主机名的授权失效，
+    #    属于"省一点内存但可能连不上库"的陷阱，不值得。
+    command:
+      - --innodb-buffer-pool-size=64M
+      - --performance-schema=OFF
     # 不映射 3306 到宿主机
     volumes:
       - pm-mysql-data:/var/lib/mysql
