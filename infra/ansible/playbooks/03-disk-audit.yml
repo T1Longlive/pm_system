@@ -1,54 +1,65 @@
 ---
 # ======================================================================
-# 03-disk-audit.yml —— 只读审计：14 G 到底是谁吃掉的
+# 03-disk-audit.yml —— 只读审计磁盘占用（⚠️ 本文件已被一次事故重写过）
+# ======================================================================
+#
+# 🔴 事故记录（2026-09-21 14:43–14:54）—— 读这个文件的人必须先看这段
 # ----------------------------------------------------------------------
-# 起因
-# ----
-# 02-log-audit 的结果出了个反转：
-#   · 容器日志合计 **1.4 MiB**  → 根本没有"日志泄漏"，之前的担心不成立
-#   · /var/lib/docker 却占了 **14 G**，而整块盘 40G 才用 20G
+# 本 playbook 的初版包含 `docker system df` 与 `docker system df -v`，
+# 结果在服务器上**卡死 3 分 33 秒后报 socket EOF**，并伴随：
+#   · dockerd 因 OOM 被内核杀掉两次（NRestarts=2）
+#   · 8 个容器里 7 个停摆（只有 pm-mysql 被重启策略拉回来）
+#   · dmesg 里连续出现 oom-kill，其中一次被杀的就是 dockerd 自己
+#     （anon-rss: 1005360kB —— 它当时吃了 1 GB）
 #
-# 所以真正该查的不是日志，是 Docker 自己。
+# 原因：`docker system df` 要**遍历每一条镜像层**去累计磁盘占用，
+# 在内存吃紧的机器上会迅速把内存推爆。
+# 这台机器 available 常年只有 138 MiB（8 容器全开时），**根本跑不起它**。
+#
+# ⇒ **本文件不再包含任何 `docker system df`。**
+#    磁盘审计一律走**纯文件系统**路径（du / df），零守护进程负载。
 #
 # ======================================================================
-# 一个待验证的假设（本 playbook 就是为它设计的）
+# 🔴 第二个教训：`du` 不加 `-x` 会把 overlay 挂载点重复计算
+# ----------------------------------------------------------------------
+#   实测对比（同一次运行）：
+#       du -sh  /var/lib/docker  →  **64 G**   ← 假的
+#       du -shx /var/lib/docker  →  **12 G**   ← 真的
+#
+# 差在哪：`/var/lib/docker/overlay2/<id>/merged` 是运行中容器的**合并视图**
+# （lower 层 + upper 层）。它是个**挂载点**，不是符号链接，所以 `du` 会走进去，
+# 把每个容器的完整文件系统**重复算一遍**。
+# `-x`（--one-file-system）让 du 停在文件系统边界，正好跳过这些挂载点。
+#
+# ⇒ **凡是对 /var/lib/docker 做 du，必须带 -x。**
+#    这也解释了当时"63 G 占用 vs 20 G 已用"的自相矛盾 —— 那是我的测量错误，
+#    不是服务器的问题。
+#
 # ======================================================================
-# `scripts/deploy.sh` 里有一行 `docker image prune -f`。
-# **不带 -a 的 image prune 只删 dangling 镜像（即没有 tag 的）**。
-#
-# 而阶段一把镜像 tag 从 `latest` 改成 commit SHA 之后：
-#   · 改造前：新镜像用 latest 覆盖 → 旧镜像失去 tag → 变 dangling → 被删掉
-#   · 改造后：每个版本的 tag 都唯一 → 旧镜像**永远带 tag** → 永远不会被删
-#
-# ⇒ 假设：**磁盘被历次部署留下的、带 SHA tag 的旧镜像占满了**。
-#   即：不可变 tag 换来回滚能力的代价，是磁盘只增不减。
-#
-# 🔴 这只是假设。本 playbook 不修任何东西 ——
-#    先把 14G 拆开看清楚，再决定改什么。**先测量，再决定。**
+# 本文件现在的定位
+# ======================================================================
+# 只回答一个安全问题：**空间花在哪一层**（镜像层 / 卷 / 构建缓存 / 日志）。
+# 不试图给出"可回收多少"的精确值 —— 那需要守护进程做重活，
+# 而在这台机器上，那样的代价大于收益。
 #
 # 运行：
 #   cd /root/pm-system/infra/ansible
 #   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/03-disk-audit.yml
 # ======================================================================
 
-- name: 审计磁盘占用（只读）
+- name: 审计磁盘占用（只读，纯文件系统路径）
   hosts: pm_servers
   gather_facts: true
   become: false
 
   vars:
     docker_root: /var/lib/docker
-    # grep -E 的模式：匹配应用镜像（pm- 或 cloudland-）
-    app_image_pattern: 'pm-|cloudland-'
 
   tasks:
 
     # ================================================================
     # 零、前置检查 —— 先证明"读到的值是真的"
     # ================================================================
-    # 2026-09-21 真实事故：控制端升到 ansible-core 2.19 后，被管端仍是
-    # Python 3.6.8（2.19 要求 3.8+）→ 模块没被执行 → 所有 register 值都是空的，
-    # 而任务仍显示 ok。所以第一件事就是把这个边界顶住。
     - name: "零 | 断言被管端 Python 在 ansible-core 的支持区间内"
       ansible.builtin.assert:
         that:
@@ -57,123 +68,102 @@
           被管端 Python 是 {{ ansible_python_version }}，低于 ansible-core 2.19
           要求的 3.8。模块会在被管端静默失败、只留下空 stdout。
           修法：把 inventory.ini 的 ansible_python_interpreter 指向
-          /usr/bin/python3.11（dnf install -y python3.11 即可）。
+          /usr/bin/python3.11。
         success_msg: "被管端 Python {{ ansible_python_version }}，在支持区间内。"
 
     # ================================================================
-    # 一、一条命令看清四类占用 —— 最关键的一屏
+    # 一、磁盘总水位
     # ================================================================
-    # docker system df 把占用拆成四块：
-    #   Images / Containers / Local Volumes / Build Cache
-    # RECLAIMABLE 那一列直接说明"哪些可以立刻回收"。
-    - name: "1/5 | Docker 占用总览"
-      ansible.builtin.command: docker system df
-      register: docker_df
-      changed_when: false
-      failed_when: false
-
-    - name: "1/5 | Docker 占用总览（输出）"
-      ansible.builtin.debug:
-        var: docker_df.stdout_lines
-
-    # ================================================================
-    # 二、镜像清单 —— 检验"旧 SHA 镜像堆积"假设
-    # ================================================================
-    # 注意 --format 后面**只能是一个**被引号包住的参数。
-    # 若写成多段并列的引号字符串，docker 会把它们当成多个位置参数，
-    # 报 "too many arguments" —— 这是折叠标量很容易踩的坑。
-    - name: "2/5 | 应用相关镜像（含 tag / 体积 / 创建时间）"
-      ansible.builtin.shell: >-
-        docker images --format
-        '{% raw %}{{.Repository}}:{{.Tag}}  size={{.Size}}  created={{.CreatedSince}}{% endraw %}'
-        | grep -E {{ app_image_pattern | quote }} | sort
-      register: app_images
-      changed_when: false
-      failed_when: false
-
-    - name: "2/5 | 应用镜像的 tag 总数（每个 tag ≈ 一次部署留下的）"
-      ansible.builtin.shell: >-
-        docker images --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}'
-        | grep -cE {{ app_image_pattern | quote }}
-      register: app_image_count
-      changed_when: false
-      failed_when: false
-
-    - name: "2/5 | dangling（无 tag）镜像数 —— image prune 只能删掉这些"
-      ansible.builtin.shell: >-
-        docker images --filter dangling=true --format '{% raw %}{{.ID}}{% endraw %}' | wc -l
-      register: dangling_count
-      changed_when: false
-      failed_when: false
-
-    - name: "2/5 | 镜像清单（输出）"
-      ansible.builtin.debug:
-        msg:
-          - "应用相关镜像 tag 数 : {{ app_image_count.stdout | default('?') | trim }}"
-          - "其中 dangling 镜像数 : {{ dangling_count.stdout | default('?') | trim }}"
-          - "  ↑ 若 tag 很多而 dangling 很少，就证实了「不可变 tag → 旧镜像永不回收」"
-          - "镜像明细："
-          - "{{ app_images.stdout_lines | default([]) }}"
-
-    # ================================================================
-    # 三、/var/lib/docker 目录拆解 —— 空间花在哪一层
-    # ================================================================
-    - name: "3/5 | /var/lib/docker 各子目录体积"
-      ansible.builtin.shell: du -sh {{ docker_root }}/*/ 2>/dev/null | sort -hr
-      register: docker_subdirs
-      changed_when: false
-      failed_when: false
-
-    - name: "3/5 | 子目录体积（输出）"
-      ansible.builtin.debug:
-        msg:
-          - "overlay2   = 镜像层 + 容器可写层"
-          - "volumes    = 具名卷（MySQL 数据在这里，**绝不能删**）"
-          - "buildkit   = 构建缓存（Cloudland 是服务器构建模式，会持续攒这个）"
-          - "containers = 容器日志与元数据（实测只有 1.4 MiB）"
-          - "{{ docker_subdirs.stdout_lines | default([]) }}"
-
-    # ================================================================
-    # 四、详细占用与卷清单
-    # ================================================================
-    - name: "4/5 | 详细占用（docker system df -v）"
-      ansible.builtin.command: docker system df -v
-      register: docker_df_verbose
-      changed_when: false
-      failed_when: false
-
-    - name: "4/5 | 具名卷名字"
-      ansible.builtin.command: docker volume ls
-      register: volume_list
-      changed_when: false
-      failed_when: false
-
-    - name: "4/5 | 磁盘总水位"
+    - name: "1/4 | 磁盘总水位"
       ansible.builtin.command: df -h /
       register: disk_now
       changed_when: false
       failed_when: false
 
-    - name: "4/5 | 卷与磁盘（输出）"
+    - name: "1/4 | 磁盘总水位（输出）"
       ansible.builtin.debug:
-        msg:
-          - "卷清单：{{ volume_list.stdout_lines | default([]) }}"
-          - "磁盘：{{ disk_now.stdout_lines | default([]) }}"
-          - "详细占用（含每个镜像/卷/缓存的大小）见下："
-          - "{{ docker_df_verbose.stdout_lines | default([]) }}"
+        var: disk_now.stdout_lines
 
     # ================================================================
-    # 五、怎么读这份结果
+    # 二、空间花在哪一层
     # ================================================================
-    - name: "5/5 | 怎么读上面的结果"
+    # 🔴 必须带 -x。不加会把 overlay2/*/merged 这些挂载点重复算进去，
+    #    实测会把 12 G 虚报成 64 G。详见文件头。
+    - name: "2/4 | /var/lib/docker 各子目录体积（-x 不跨文件系统）"
+      ansible.builtin.shell: du -shx {{ docker_root }}/*/ 2>/dev/null | sort -hr
+      register: docker_subdirs
+      changed_when: false
+      failed_when: false
+
+    - name: "2/4 | 对照：不加 -x 会虚报多少"
+      ansible.builtin.shell: >-
+        printf 'du -shx  →  %s\n' "$(du -shx {{ docker_root }} 2>/dev/null | cut -f1)"
+        && printf 'du -sh   →  %s  （这是虚报值，供对照）\n' "$(du -sh {{ docker_root }} 2>/dev/null | cut -f1)"
+      register: du_contrast
+      changed_when: false
+      failed_when: false
+
+    - name: "2/4 | 子目录体积（输出）"
       ansible.builtin.debug:
         msg:
-          - "① docker system df 的 Images 行：看 SIZE 与 RECLAIMABLE"
-          - "   RECLAIMABLE 很大 → 确实是可回收的旧镜像，假设成立"
-          - "   RECLAIMABLE 很小 → 空间在 Volumes / Build Cache，方向要改"
-          - "② 应用镜像 tag 数：每个 SHA tag ≈ 一次部署"
-          - "   tag 多 + dangling 少 ⇒ 证实「不可变 tag → 旧镜像永不回收」"
-          - "③ volumes：MySQL 数据占多少"
-          - "   这部分**永远不能靠 prune 回收**，只能归档或清理历史数据"
-          - "④ buildkit：Cloudland 在服务器上构建，缓存会持续膨胀"
-          - "   可用 docker builder prune 回收，但要评估下次构建会不会因此变慢"
+          - "overlay2   = 镜像层 + 容器可写层"
+          - "volumes    = 具名卷（MySQL 数据在这里，**绝不能删**）"
+          - "buildkit   = 构建缓存（Cloudland 是服务器构建模式，会持续攒）"
+          - "containers = 容器日志与元数据（实测仅 1.9 MiB）"
+          - "{{ docker_subdirs.stdout_lines | default([]) }}"
+          - ""
+          - "{{ du_contrast.stdout_lines | default([]) }}"
+
+    # ================================================================
+    # 三、镜像层目录数 —— 用文件系统计数，完全不碰守护进程
+    # ================================================================
+    # overlay2 下每个目录就是一层。数量本身能说明"层在不在堆积"，
+    # 而且这个计数是纯 ls，零内存开销。
+    - name: "3/4 | overlay2 层目录数量"
+      ansible.builtin.shell: >-
+        printf '层目录数      : %s\n' "$(ls -1 {{ docker_root }}/overlay2 2>/dev/null | grep -c '^[0-9a-f]\{64\}$')"
+        && printf '其中容器层    : %s\n' "$(ls -1 {{ docker_root }}/overlay2 2>/dev/null | grep -c -- '-init$')"
+      register: layer_count
+      changed_when: false
+      failed_when: false
+
+    - name: "3/4 | 应用镜像 tag 清单"
+      ansible.builtin.shell: >-
+        docker images --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}'
+        | grep -E '^(pm-|cloudland-|crpi-)' | sort
+      register: tag_list
+      changed_when: false
+      failed_when: false
+
+    - name: "3/4 | 应用镜像 tag 计数"
+      ansible.builtin.shell: >-
+        docker images --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}'
+        | grep -cE '^(pm-|cloudland-|crpi-)'
+      register: tag_count
+      changed_when: false
+      failed_when: false
+
+    - name: "3/4 | 层与 tag（输出）"
+      ansible.builtin.debug:
+        msg:
+          - "{{ layer_count.stdout_lines | default([]) }}"
+          - "应用相关 tag 数: {{ tag_count.stdout | default('?') | trim }}（≈ 部署过多少次）"
+          - "tag 清单（最多 30 条）："
+          - "{{ tag_list.stdout_lines | default([])[:30] }}"
+          - "↑ 层数远大于 tag 数说明层被共享复用，属正常"
+
+    # ================================================================
+    # 四、具名卷
+    # ================================================================
+    - name: "4/4 | 具名卷体积"
+      ansible.builtin.shell: du -shx {{ docker_root }}/volumes/*/ 2>/dev/null | sort -hr
+      register: volume_sizes
+      changed_when: false
+      failed_when: false
+
+    - name: "4/4 | 卷体积（输出）"
+      ansible.builtin.debug:
+        msg:
+          - "⚠️ 这些是 PM 与 Cloudland 的 MySQL 数据，**绝不能靠 prune 回收**"
+          - "目录名是卷 ID，可用 docker volume ls 对照名字（那条命令很轻，安全）"
+          - "{{ volume_sizes.stdout_lines | default([]) }}"

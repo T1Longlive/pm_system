@@ -166,7 +166,7 @@ if [ -z "$TARGET_COMMIT" ]; then
       log "Skipping deploy: 本次变更未触及应用路径（线上保持 $RUNNING_TAG）"
       log "  变更文件（最多 20 条）："
       printf '%s\n' "$CHANGED" | head -20 | sed 's/^/    /' | tee -a "$LOG_FILE"
-      log "  判定依据：以上路径全部命中非应用白名单之外为空 —— 即没有后端/前端/编排变更。"
+      log "  判定依据：以上路径全部属于「与运行无关」的文件（docs/ infra/ *.md 等），后端、前端、compose 均未改动。"
       exit 0
     fi
     log "变更触及应用路径，继续部署（$RUNNING_TAG -> $IMAGE_TAG）"
