@@ -28,6 +28,25 @@
 #
 # ⚠️ 这些不是"可选优化"。删掉它们，OOM 会再来一次。
 #
+# ======================================================================
+# 🔴 容器内存上限（mem_limit）：爆炸半径控制
+# ----------------------------------------------------------------------
+# 上面那些参数管的是"少用内存"；mem_limit 管的是**失控时的边界**。
+#
+# 没有它的时候，任何一个容器都可以吃满 1.87 GiB 宿主机内存 ——
+# 2026-09-21 的事故就是这么发生的：mysqld 触发 OOM，内核把 **dockerd 自己**
+# 杀了两次，8 个容器里 7 个停摆，而 Docker 因 hasBeenManuallyStopped=true
+# 不会自动拉起它们。整机停摆约 30 分钟。
+#
+# 设上限之后：OOM 被关在那个容器的 cgroup 里，**只杀它自己**，
+# dockerd 与其余 7 个容器毫发无伤。事故规模从"整机停摆"降为"一个容器重启一次"。
+#
+# ⚠️ 各项限额之和（2176 MiB）**大于**物理内存（1870 MiB）—— 这是刻意的：
+#    mem_limit 不是"总量配额"，而是"单个容器的失控边界"。
+#    真要限制总量，得靠宿主机本身加内存，或减少并发负载。
+# ⚠️ 只设 mem_limit 时，Docker 会让 memswap_limit 默认为它的 2 倍，
+#    即允许容器用等量 swap —— 我们保留这个默认（宁可慢，也不要被直接杀掉）。
+#
 # ⚠️ 应用镜像按 IMAGE_TAG 取 tag（值 = commit SHA），不再是 latest。
 #    正常部署走 scripts/deploy.sh（它负责计算并导出 IMAGE_TAG）。
 #    手工排查时也必须带上，否则本文件会直接报错：
@@ -49,6 +68,8 @@ services:
     # （报错文案保持纯 ASCII，避免服务器 locale 不完整时输出乱码。）
     image: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/pm-backend:${IMAGE_TAG:?IMAGE_TAG is not set - deploy via scripts/deploy.sh}
     container_name: pm-backend
+    # 容器内存上限 —— 爆炸半径控制：超了只杀这个容器，不波及整机/dockerd
+    mem_limit: 512m
     env_file:
       - .env
     environment:
@@ -92,6 +113,8 @@ services:
     # 同上：镜像来自云端构建产物；tag 由 IMAGE_TAG 决定（见文件头说明）
     image: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/pm-frontend:${IMAGE_TAG:?IMAGE_TAG is not set - deploy via scripts/deploy.sh}
     container_name: pm-frontend
+    # 容器内存上限 —— 爆炸半径控制：超了只杀这个容器，不波及整机/dockerd
+    mem_limit: 64m
     ports:
       # 对外唯一入口。改这里即可调整对外端口。
       - "8081:80"
@@ -102,6 +125,8 @@ services:
   mysql:
     image: mysql:8.0
     container_name: pm-mysql
+    # 容器内存上限 —— 爆炸半径控制：超了只杀这个容器，不波及整机/dockerd
+    mem_limit: 384m
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
       MYSQL_DATABASE: pm_system
@@ -140,6 +165,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: pm-redis
+    # 容器内存上限 —— 爆炸半径控制：超了只杀这个容器，不波及整机/dockerd
+    mem_limit: 128m
     command: redis-server --requirepass ${REDIS_PASSWORD}
     # 不映射 6379 到宿主机
     volumes:
