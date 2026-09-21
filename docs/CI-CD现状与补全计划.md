@@ -5,32 +5,63 @@
 >
 > 覆盖 **pm-system** 与 **Cloudland** 两个项目。
 >
-> 最后更新：2026-09-15
+> 最后更新：**2026-09-21** —— 当天发生一次线上 OOM 事故（最严重的一次），
+> 并完成内存加固与一轮 IaC（基础设施即代码）补全。见 §4、§6.4、§7.12～§7.14。
 
 ---
 
-## 0. 怎么用这份文档
+## 0. 从这里开始（新会话必读）
+
+### 目标
+
+**把 CI/CD 与基础设施管理这条链路跑通、把概念吃透。**
 
 > **项目性质：学习项目，不是生产系统。**
-> 目标是把 CI/CD 链路跑通、把概念吃透，不是把它做成能承载真实业务的系统。
+> 目标是把链路跑通、把概念吃透，不是把它做成能承载真实业务的系统。
 > 因此：
 > - **不要反复提醒"生产环境应该做 X"** —— 高可用、监控告警、审计、密钥轮换、
 >   多副本、灰度发布这些，这里**是有意不做**，不是遗漏。提一次说明白即可，
 >   不必每轮重复。
-> - 优先级的排序标准是「**会不会妨碍把链路跑通 / 学到东西**」，
+> - 优先级排序的标准是「**会不会妨碍把链路跑通 / 学到东西**」，
 >   而不是「生产加固的紧迫度」。
 > - 唯一的例外：**会造成不可逆数据损失的操作**（删库、删 registry 仓库、覆盖未提交的改动），
 >   无论什么项目都该在动手前提醒一次。
 
+### 现在到哪了（一句话）
+
+**四个阶段全部完成**：配置外置 → 镜像 tag 版本化 + 回滚 → 单元测试门禁 → 健康检查 + 内存加固。
+
+另有一条**并行的 IaC（基础设施即代码）线**在推进：Ansible 已能声明式管理服务器配置
+（`infra/ansible/`，6 个 playbook 都能跑通），**但还不能自动执行** ——
+所有 playbook 仍靠手动跑，这是当前最大的缺口（见 §10 的「IaC 收尾 ②」）。
+
+**当天刚经历一次事故**：OOM 雪崩导致线上停摆约 30 分钟。已完成加固，
+可用内存从 **138 MiB 回到 869 MiB**，之后无新 OOM。细节见 §6.4。
+
+### 上手第一步
+
+```bash
+# ① 确认线上状态：健康、版本、余量
+curl -s -o /dev/null -w 'pm-system %{http_code}\n' http://8.137.114.176:8081
+curl -s -o /dev/null -w 'cloudland %{http_code}\n' http://8.137.114.176:80
+ssh root@8.137.114.176 'docker ps; free -m'     # 或直接用专用密钥 ~/.ssh/pm_agent
+
+# ② 进度与待办的权威来源就是本文档：§5（进度总览）+ §10（待办清单）
+```
+
+### 导航
+
 | 你想做什么 | 看哪节 |
 |---|---|
 | 搞清楚两个项目现在什么样 | §1、§3 |
-| **知道补全做到哪了、还差什么** | **§5（进度总览）** |
+| **知道做到哪了、还差什么** | **§5（进度总览）** |
 | 知道有哪些共享资源、值是多少 | **§2（最常查）** |
-| 知道踩过哪些坑、别再踩 | **§7（最值钱）** |
+| **知道踩过哪些坑、别再踩** | **§7（最值钱）** |
+| **跑 / 改基础设施代码（Ansible）** | **§8.3 + §9 的 IaC 部分** |
+| 知道当天发生了什么事故 | **§4、§6.4** |
 | 知道要改哪个文件 | §8 |
 | 找命令 | §9 |
-| 接着往下做 | **§6（补全计划）** |
+| 接着往下做 | **§6（补全计划）+ §10（待办）** |
 
 ---
 
@@ -59,11 +90,18 @@
 
 | 项 | 值 |
 |---|---|
-| 主机 | 阿里云 ECS，`8.137.114.176` |
-| 规格 | **1.8 GiB 内存** / 40G 磁盘 —— **内存是硬约束** |
-| Docker | 已装，daemon 配了 `registry-mirrors`（含 `docker.1panel.live`） |
-| 面板 | 1Panel（`/root/install_panel.sh`） |
+| 主机 | 阿里云 ECS，`8.137.114.176`，root |
+| 规格 | **1870 MiB 内存** / 40G 磁盘（用 20G）—— **内存是硬约束，已发生过一次 OOM 事故，见 §6.4** |
+| 当前余量 | `available` **869 MiB**（事故前只有 138 MiB） |
+| 面板 | **BT-Panel（宝塔）**，监听 8888 |
+| Docker | 26.1.3 / Compose v2.27.0；`daemon.json` 的镜像源现只留 `docker.1panel.live`；已开 `live-restore` |
 | Gitee runner | 已注册，`/root/gitee-go-runner` |
+| SSH 接入 | **密钥认证**：专用密钥 `~/.ssh/pm_agent`（公钥注释 `ai-agent`，已在服务器 `authorized_keys`） |
+| Ansible | `/root/.ansible-venv`（Python **3.11.13** + ansible-core **2.19.13**），由 `infra/ansible/bootstrap.sh` 管理 |
+| swap | `/www/swap` 1G + **`/swapfile2` 2G**（后者已写入 fstab，由 `apply/04-swap.yml` 管理） |
+
+> ⚠️ **早前文档写的「1Panel」是错的** —— 实测监听 8888 的是 **BT-Panel（宝塔面板）**。
+> `docker.1panel.live` 只是 1Panel 提供的**公共 Docker Hub 代理**，无需装 1Panel 就能用。两者不矛盾。
 
 ### 2.2 容器镜像服务 ACR
 
@@ -204,7 +242,7 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 
 | | 能连 Docker Hub | 能连 ACR |
 |---|---|---|
-| 阿里云主机 | ✅（靠 1Panel 镜像加速） | ✅ |
+| 阿里云主机 | ✅（靠 `docker.1panel.live` 这个公共代理加速；**不是装了 1Panel**，见 §2.1） | ✅ |
 | Gitee 云端构建机 | ❌ **i/o timeout** | ✅ |
 
 **唯一交集是 ACR。** 所以由"能连 Docker Hub 的一方"搬一次，之后全部走 ACR。
@@ -243,6 +281,35 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 1. 照搬方案 B（8 个文件），**复用 pm-system 的 ACR 凭证与命名空间**
 2. 转存 Cloudland 的 4 个基础镜像
 3. **验证**：改首页文案为「你好世界」→ push → 浏览器看到 ✓，流水线全绿 ✓
+
+---
+
+### 2026-09-21 —— 线上 OOM 事故 + 内存加固 + IaC 补全
+
+**当天发生了本项目最严重的一次事故**（完整时间线见 §6.4）：
+
+```
+14:43  BT-Task 触发 OOM → 杀 cloudland-mysql
+14:45  mysqld 触发 OOM → 杀掉 dockerd 自己（anon-rss 1 GB）
+14:47  再杀 dockerd；14:52 systemd 拉起；14:54 又被杀（NRestarts=2）
+14:54  dockerd 日志：hasBeenManuallyStopped=true ⇒ 7 个容器不会被自动拉起
+15:25  手动分步恢复，两个项目恢复 HTTP 200
+```
+
+**根因**：结构性内存超配（1870 MiB 装 1700 MiB 需求，余量仅 138 MiB）。
+**推手**：流水线无路径过滤 —— 当天推了 6 次，每次都重建容器、冷启动两个 JVM。
+
+当天做完的事：
+
+| | 内容 | 效果 |
+|---|---|---|
+| 内存加固 | JVM 堆上限 + MySQL 参数 + 2 GiB swap + 容器 `mem_limit` | 可用内存 **138 → 869 MiB** |
+| fail-fast | `-XX:+ExitOnOutOfMemoryError` | OOM 从"静默降级"变成"容器重启 + 健康检查发现" |
+| 路径守卫 | `deploy.sh` 里加：只有触及应用路径的变更才重新部署（两个项目都加了） | 当天 6 次推送中 **4 次本该被跳过** |
+| IaC 起步 | `infra/ansible/`：bootstrap + 3 个只读探针 + 3 个 apply 剧本 | 目录名即安全等级（见 §8.3） |
+| Ansible 环境 | 服务器 Python 3.6.8 → **3.11.13**，ansible-core → **2.19.13** | 钉死版本区间，装完自检 |
+
+**当天新增的坑与铁律**：§7.12（路径过滤）、§7.13（三个测错的教训）、§7.14（两条操作纪律）。
 
 ---
 
@@ -1149,6 +1216,69 @@ ACR 被清空后，第 1 次 push 只产生唯一版本，**第 2 次 push 才�
 
 ---
 
+### 7.12 🔴 流水线没有路径过滤 —— 但**不要**去 `triggers` 里猜字段名
+
+**事实（已查证官方文档）**：Gitee Go（个人版）的 push 触发只支持「分支 / Tag / 提交注释」三类匹配，
+**没有文件路径过滤** —— 那是 Gitee **企业版**流水线的能力。
+（对照两页官方文档：`help.gitee.com/gitee-go/pipeline/trigger` 只有三类；
+`help.gitee.com/enterprise/pipeline/source/trigger` 多一条「文件/目录匹配」。）
+
+**为什么不去 `triggers` 里加个 `paths:` 试试**：不被识别的字段在 Gitee Go 里是**静默忽略**的（§7.5），
+而最坏情况是**整个触发配置失效 → 完全不再自动部署** —— 比"多部署几次"严重得多。
+
+**做法**：守卫放在 `scripts/deploy.sh` 里（提交 `dfd6821`）。
+只有**全部**变更都落在非应用路径下才跳过部署；判定方向刻意用黑名单，
+让漏判偏向"多部署一次"（无害），而不是"该部署却跳过"（危险）。
+落在版本控制内的好处：可 review、可测试、**不会被网页编辑器改掉**（§7.1）。
+
+🔴 **一个必须记住的参数**：`git -c core.quotepath=false diff --name-only`。
+git 默认给含非 ASCII 的路径加双引号并做八进制转义 ——
+`docs/CI-CD现状与补全计划.md` 会变成 `"docs/CI-CD\347\216\260..."`，
+以引号开头就匹配不上 `^docs/`，会把「只改了文档」误判成「改了应用」。
+**这个 bug 是拿真实提交历史跑测试才发现的，光看正则看不出来。**
+
+**已验证的双向证据**（`/var/log/pm-system-deploy.log`）：
+```
+Skipping deploy: 本次变更未触及应用路径（线上保持 dfd6821c…）   ← docs-only，正确跳过
+变更触及应用路径，继续部署（… -> …）                          ← 含 docker-compose.yml，正确部署
+```
+跳过时**镜像 tag 不变**（容器一个都没重启），而仓库 HEAD 已同步 —— **代码同步与容器重启被成功解耦**。
+
+### 7.13 🔴 三个「我以为测对了」的教训（都是同一个模式）
+
+| 我以为 | 真相 | 通则 |
+|---|---|---|
+| `du -sh /var/lib/docker` = **64 G** | 真实是 **12 G**。不加 `-x` 时 `du` 会走进 `overlay2/*/merged`（运行中容器的合并视图**挂载点**，不是符号链接）重复计算 | **凡对 `/var/lib/docker` 做 du，必须带 `-x`** |
+| 用 `docker system df` 查占用 | **这台机器上禁跑**：它要遍历每一条镜像层，在 available 138 MiB 时把内存推爆（实测卡死 3 分 33 秒后 socket EOF，期间 dockerd 被 OOM 杀了两次） | 磁盘审计走纯文件系统路径（`du -shx` / `df`） |
+| `docker manifest inspect` 能查镜像存在 → 得出"ACR 上没有，流水线没跑" | 该检查在这套 ACR 上**不可靠**，结论**完全错了**（实际构建号 40–46 全部正常、每次部署都成功） | **判断流水线是否跑过，看服务器 `/var/log/*-deploy.log`**，不要做 ACR 探测 |
+
+> **通则：凡"看起来对"的东西 —— 正则、镜像探测、`du`、`docker system df` —— 几乎都骗过我。
+> 只有拿真实环境跑一遍才靠得住。**
+> 附带一条：**判断被推翻不是失败，是测量生效了。** 当天有两个假设（"容器日志在泄漏"、"磁盘被旧镜像堆满"）
+> 都是被数据推翻的 —— 若按它们动手，会为不存在的问题安排一次高风险重启。
+
+### 7.14 🔴 两条操作纪律（不遵守会**静默**出错）
+
+**一、`failed_when: false` 会吞掉一切失败，包括"根本没执行"。**
+
+只读任务为了让"文件不存在"不算失败而关掉失败判定是合理的，
+但那样也会把「**模块根本没在被管端执行**」一起吞掉 —— 表现为**任务显示 ok、值却是空的**。
+（实测案例：ansible-core 升到 2.19 后被管端 Python 仍是 3.6.8 → 不在支持区间 → 模块不执行，
+所有 `register` 变量都没有 `stdout`，而整个 playbook 显示全绿。）
+
+⇒ **凡是关掉失败判定的地方，都必须另有一个检查点兜底。**
+（Ansible 侧的定式：`gather_facts: true` + 断言 `ansible_python_version is version('3.8','>=')`。）
+
+**二、bash 双引号内绝不能出现反引号** —— 会被当作命令替换执行。当天为此栽了两次：
+
+- `python -c "…正则 \s*$…"` 里 `$` 被转义 → 正则变成"匹配字面美元符" → **静默插 0 条且不报错**
+- `git commit -m "…\`ai-agentn\`…"` 里反引号被当命令执行 → **提交信息那几处被替换成空白**
+
+⇒ 带正则 / `$` / 反斜杠的脚本**一律写成文件再跑**（`python -c` 只用于无这些字符的短表达式）；
+**commit message 改用 `git commit -F <文件>`**，完全绕开 shell 转义。
+
+---
+
 ## 8. 关键文件索引
 
 ### 8.1 pm-system
@@ -1156,14 +1286,14 @@ ACR 被清空后，第 1 次 push 只产生唯一版本，**第 2 次 push 才�
 | 文件 | 作用 |
 |---|---|
 | `.workflow/流水线-202609111651.yml` | 流水线：`build@docker`×2（tag=`${GITEE_COMMIT}`）+ `shell@agent` 部署，`dependsOn` 门禁 |
-| `docker-compose.yml` | 4 服务；backend/frontend 用 ACR 镜像 + `${IMAGE_TAG:?}`；mysql 挂了 `init.sql` |
+| `docker-compose.yml` | 4 服务；backend/frontend 用 ACR 镜像 + `${IMAGE_TAG:?}`；mysql 挂了 `init.sql`；🔴 **每个服务都有 `mem_limit`、backend 有 JVM 堆上限 —— 都是事故后加的，不要删（§6.4）** |
 | `backend/Dockerfile` | 多阶段：`maven:3.9-eclipse-temurin-17` → `eclipse-temurin:17-jre`，FROM 均为 ACR；**`mvn clean package` 不带 `-DskipTests`**（测试即门禁） |
 | `backend/src/test/.../RequirementStageServiceImplTest.java` | **需求阶段派生纯单测**（17 用例）—— 核心业务规则 |
 | `backend/src/test/.../JwtUtilTest.java` | **JWT 安全性质单测**（6 用例）—— 防篡改/防伪造/过期 |
 | `backend/src/test/.../PmApplicationTests.java` | 上下文冒烟，**`@Disabled`**（要真实 MySQL） |
 | `frontend/Dockerfile` | `node:20-alpine` → `nginx:alpine`，COPY 路径带 `frontend/` 前缀 |
 | `frontend/nginx.conf` | 静态托管 + `/api` 反代，**`$http_host`** |
-| `scripts/deploy.sh` | 服务器部署：flock、解析 `IMAGE_TAG`、`pull`、`up -d`、健康检查、记录当前 tag |
+| `scripts/deploy.sh` | 服务器部署：flock、解析 `IMAGE_TAG`、**路径守卫（§7.12）**、`pull`、`up -d`、健康检查、记录当前 tag |
 | `scripts/rollback.sh` | **回滚**：解析 SHA → 校验目标提交可用 → 预拉镜像 → 交给 deploy.sh |
 | `scripts/mirror-base-images.sh` | 基础镜像转存 ACR |
 | `.env.example` | 环境变量模板（13 项 + `IMAGE_TAG` 禁令说明） |
@@ -1186,6 +1316,27 @@ ACR 被清空后，第 1 次 push 只产生唯一版本，**第 2 次 push 才�
 | `scripts/rollback.sh` | **回滚**：同 pm-system，容器名/端口按 Cloudland 调整 |
 | `scripts/mirror-base-images.sh` | 基础镜像转存（含"已下线镜像复用本地"逻辑） |
 | `.gitattributes` / `.dockerignore` | 本次新增（此前缺失） |
+
+---
+
+### 8.3 IaC / 服务器配置即代码（`infra/ansible/`）
+
+> 🔴 **目录名就是安全等级**：`audit/` 只读、随时可跑；`apply/` 会改系统、**必须先演练后执行**。
+> 编号不连续是**有意的** —— 数字 = 加入仓库的先后顺序，是稳定引用；重新编号会让历史提交、文档、记忆里的路径全部对不上。
+> 目前只服务 pm-system（Cloudland 还没纳入，但两项目同机、共享很有价值）。
+
+| 文件 | 作用 |
+|---|---|
+| `bootstrap.sh` | 装 ansible-core 到 `/root/.ansible-venv`。**幂等 + 版本感知 + 钉死版本区间**；含 dnf 装 python3.11（循环依赖，只能由引导脚本负责） |
+| `inventory.ini` | 单机清单，`connection=local`（不需 SSH 密钥）；🔴 **被管端解释器必须指 `/usr/bin/python3.11`**，否则模块静默不执行（§7.14） |
+| `playbooks/audit/00-baseline.yml` | 采集主机 / Docker / 配置与凭据 / 调度 / 部署目录的现状 ✅ `changed=0` |
+| `playbooks/audit/02-log-audit.yml` | 审计日志占用（实测容器日志仅 1.4 MiB，非问题） |
+| `playbooks/audit/03-disk-audit.yml` | 审计磁盘（**已剔除 `docker system df`**，全用 `du -shx`） |
+| `playbooks/apply/01-docker-daemon.yml` | 收敛 `daemon.json`（镜像源 + `live-restore`）✅ 演练/执行/幂等三跑通过 |
+| `playbooks/apply/04-swap.yml` | 2 GiB swap + fstab（幂等，`/etc/fstab` 有 `backup: true`）✅ 演练 `changed=0` |
+| `playbooks/apply/05-ssh-authorized-keys.yml` | 授权公钥（**regexp 锚在公钥本体**，不是注释字段）✅ 已执行 |
+
+**尚未纳入 IaC 的**：logrotate（暂时没配置）、crontab（暂无）、Cloudland 侧。
 
 ---
 
@@ -1258,6 +1409,43 @@ cd /root/pm-system && /bin/bash scripts/deploy.sh main
 git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 dependsOn
 ```
 
+### IaC / Ansible（两个项目共用 pm-system 这一份）
+
+```bash
+# 一次性：在服务器上准备 Ansible 环境（幂等，重复跑安全；缺 python3.11 会自动装）
+cd /root/pm-system && /bin/bash infra/ansible/bootstrap.sh
+
+cd /root/pm-system/infra/ansible
+
+# 只读探针 —— 随时可跑，不改动系统
+/root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/audit/00-baseline.yml
+/root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/audit/02-log-audit.yml
+/root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/audit/03-disk-audit.yml
+
+# 会改系统的 —— 三步走，第三步是硬要求
+/root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/<名字>.yml --check --diff  # ① 演练
+/root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/<名字>.yml                 # ② 执行
+/root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/<名字>.yml                 # ③ 幂等验收：必须 changed=0
+```
+
+**改了 `infra/` 之后怎么上线**：push 到 main，流水线会跑完整构建但**路径守卫会跳过容器重建**
+（`infra/` 在非应用路径白名单里）—— 代码仍会被 `git reset --hard` 同步到服务器 ✓
+
+```bash
+# 验证跳过是否发生（应看到 Skipping deploy）
+grep -E "变更触及应用路径|Skipping deploy" /var/log/pm-system-deploy.log | tail -3
+# 确认代码确实同步了（HEAD 变了但镜像 tag 没变）
+cd /root/pm-system && git log --oneline -1
+docker inspect -f '{{.Config.Image}}' pm-backend
+```
+
+### 看当前各容器的内存与上限
+
+```bash
+docker stats --no-stream        # MEM USAGE / LIMIT 一列就是上限，超了只杀那个容器
+free -m                         # 关注 available，不是 free
+```
+
 ---
 
 ## 10. 待办清单
@@ -1291,6 +1479,21 @@ git fetch origin main && git show FETCH_HEAD:.workflow/<文件>.yml | grep -A2 d
 - [ ] 观察几天：`docker stats` 看两个 backend 是否稳定在 180 MiB 附近。持续爬升 ⇒ 额度偏小或有内存泄漏
 - [x] ~~上线后立即修改初始管理员密码~~ —— 已改
 - [ ] Cloudland 首页标语统一：`HomeView.vue` 第 13 行英文版、`LoginForm.vue` 第 10/45 行仍是旧文案
+
+### IaC 收尾（当前最该做的方向）
+
+- [ ] 🔴 **② 自动执行 + 漂移检测** —— **这是当前最大的缺口**。
+  现在 6 个 playbook **全靠手动跑**，没有定时、没有流水线触发
+  ⇒ 「配置的**描述**在代码里，但**收敛**仍依赖有人记得去跑」。
+  **这条就是「基础设施即代码」与「一堆更好的脚本」的分界线。**
+  做法：建一条**只跑探针、不含构建阶段**的独立流水线，用 Gitee Go 的 `triggers.schedule` 定时触发，
+  每天跑 `audit/` 的探针 + `apply/` 的 `--check`；**`--check` 报 `changed≠0` 就是漂移信号**（有人手工改了配置）。
+  ⚠️ `triggers.schedule` **只在官方文档里见过、尚未实测** —— 按当天教训，**先验证再动流水线文件**
+  （那份文件被网页编辑器坑过 4 次，§7.1）。
+- [ ] **③ 补齐还缺的配置项** —— logrotate（应用日志切割，目前没有）、crontab（目前没有）
+- [ ] **Cloudland 纳入 IaC** —— `infra/ansible/` 目前只服务 pm-system。两项目同机同架构，共享价值高
+- [ ] 加 `-XX:+ExitOnOutOfMemoryError` 之后的**观察**：`docker stats` 看两个 backend 是否稳定在 180 MiB 附近，
+  **以及 `RestartCount` 有没有涨**（涨了就是发生过 OOM 退出 —— 这正是 fail-fast 想要的可观测性）
 
 ---
 
