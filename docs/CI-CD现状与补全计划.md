@@ -36,7 +36,10 @@
 所有 playbook 仍靠手动跑，这是当前最大的缺口（见 §10 的「IaC 收尾 ②」）。
 
 **当天刚经历一次事故**：OOM 雪崩导致线上停摆约 30 分钟。已完成加固，
-可用内存从 **138 MiB 回到 869 MiB**，之后无新 OOM。细节见 §6.4。
+可用内存从 **138 MiB 回到约 870 MiB**（快照值，会浮动），之后无新 OOM。细节见 §6.4。
+
+另：19:33 把 `apply/01` 号 playbook 真正执行了一遍，把 `live-restore` 收敛上线 ——
+**此前它一直没生效**（§7.15）。这是"IaC 只写期望状态、没有漂移检测"的实证。
 
 ### 上手第一步
 
@@ -92,9 +95,9 @@ ssh root@8.137.114.176 'docker ps; free -m'     # 或直接用专用密钥 ~/.ss
 |---|---|
 | 主机 | 阿里云 ECS，`8.137.114.176`，root |
 | 规格 | **1870 MiB 内存** / 40G 磁盘（用 20G）—— **内存是硬约束，已发生过一次 OOM 事故，见 §6.4** |
-| 当前余量 | `available` **869 MiB**（事故前只有 138 MiB） |
+| 当前余量 | `available` **≈876 MiB**（事故前只有 138 MiB）。⚠️ 这是**快照值，会浮动**（16:5x 实测 869、19:3x 实测 876），别把它当固定数字写进结论 |
 | 面板 | **BT-Panel（宝塔）**，监听 8888 |
-| Docker | 26.1.3 / Compose v2.27.0；`daemon.json` 的镜像源现只留 `docker.1panel.live`；已开 `live-restore` |
+| Docker | 26.1.3 / Compose v2.27.0；`daemon.json` = 镜像源 `docker.1panel.live` + `live-restore: true`（**2026-09-21 19:33 由 `apply/01` 收敛并验证**；此前它其实没生效过，见 §7.15） |
 | Gitee runner | 已注册，`/root/gitee-go-runner` |
 | SSH 接入 | **密钥认证**：专用密钥 `~/.ssh/pm_agent`（公钥注释 `ai-agent`，已在服务器 `authorized_keys`） |
 | Ansible | `/root/.ansible-venv`（Python **3.11.13** + ansible-core **2.19.13**），由 `infra/ansible/bootstrap.sh` 管理 |
@@ -303,7 +306,7 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 
 | | 内容 | 效果 |
 |---|---|---|
-| 内存加固 | JVM 堆上限 + MySQL 参数 + 2 GiB swap + 容器 `mem_limit` | 可用内存 **138 → 869 MiB** |
+| 内存加固 | JVM 堆上限 + MySQL 参数 + 2 GiB swap + 容器 `mem_limit` | 可用内存 **138 → 约 870 MiB**（快照值） |
 | fail-fast | `-XX:+ExitOnOutOfMemoryError` | OOM 从"静默降级"变成"容器重启 + 健康检查发现" |
 | 路径守卫 | `deploy.sh` 里加：只有触及应用路径的变更才重新部署（两个项目都加了） | 当天 6 次推送中 **4 次本该被跳过** |
 | IaC 起步 | `infra/ansible/`：bootstrap + 3 个只读探针 + 3 个 apply 剧本 | 目录名即安全等级（见 §8.3） |
@@ -336,7 +339,7 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 |---|---|---|---|
 | **阶段一** | 回滚能力（镜像 tag 版本化） | **100%** | ✅ tag 机制由构建器原始参数直接证实；回滚**用新 tag 实测通过**（§6.1） |
 | **阶段二** | 补上 CI（单元测试） | **100%** | ✅ **云端已验证**：构建日志 `Tests run: 24, Failures: 0`（§6.2） |
-| **阶段三** | 健康检查补上后端 | **~95%** | ✅ 健康路径生产实测 `stable 26s, restarts=0`；故障路径待验证（§6.3） |
+| **阶段三** | 健康检查补上后端 | **100%** | ✅ 健康路径生产实测 `stable 26s, restarts=0`；**故障路径也已在生产被意外验证** —— 16:53 前端 `restarts=1` 被拦下并 `exit 1`（§6.3） |
 | 阶段四 | 内存与稳定性 | **100%** | ✅ **事故驱动，已完成**（JVM 堆上限 + MySQL 参数 + swap + `mem_limit`，见 §6.4） |
 
 ### 5.3 核心问题：原问题已解决，但边界要说清
@@ -366,7 +369,7 @@ t1longlive/cloudland-backend:<commit-sha> t1longlive/cloudland-frontend:<commit-
 
 | 项 | 位置 | 性质 |
 |---|---|---|
-| Cloudland 回滚能力尚未恢复 | Cloudland | 它还差一次推送才产生第 1 个 SHA 版本，再推一次才有可回退目标 |
+| ~~Cloudland 回滚能力尚未恢复~~ | Cloudland | **2026-09-21 已确认具备**：线上跑 `add7fe7`（= 服务器 HEAD = 最新，不在回滚点）；部署日志显示 `5ec16e3` 与 `add7fe7` 两次都成功 pull ⇒ ACR 上至少 2 个 tag。⚠️ 依据部署日志推断，**未直接查 ACR 控制台** |
 | Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段） | 流水线 | 待验证 |
 | Cloudland 首页标语不统一 | `HomeView.vue` / `LoginForm.vue` | 低优先 |
 | Cloudland `jwt.expire` 与 `jwt.week` 默认值相同 → `remember` 不生效 | Cloudland | 待确认业务意图，未改 |
@@ -455,8 +458,9 @@ cd /root/pm-system
 ```bash
 # 1) 正常部署一次，确认日志里 tag 是完整 SHA，且容器用的是它
 tail -50 /var/log/pm-system-deploy.log
-cat /var/log/pm-system-current-tag
-docker inspect -f '{{.Name}} -> {{.Config.Image}}' pm-backend pm-frontend
+docker inspect -f '{{.Name}} -> {{.Config.Image}}' pm-backend pm-frontend   # ← 权威：容器实际镜像
+# ⚠️ cat /var/log/pm-system-current-tag 只能当辅助 —— 它会陈旧（见 §7.12 / §6.3）
+#    实测：2026-09-21 该文件停在 10a1c02，容器实际跑 63c4e71
 
 # 2) 故意改坏前端一行文案并 push，等它上线
 
@@ -858,7 +862,7 @@ wait_for_container "$FRONTEND_CONTAINER" 0   # 前端是 nginx，起来即就绪
 ⚠️ 模拟刻意采用**对旧方案最有利**的假设（`status` 永远返回 `running`），
 这正是 Spring Boot 启动期崩溃的真实形态。
 
-#### 服务器端验收：健康路径 ✅ 已通过；故障路径 ⏳ 待验证
+#### 服务器端验收：健康路径 ✅；故障路径 ✅（生产意外触发，已留证）
 
 **① 健康路径：已在生产验证通过**（2026-09-15 16:00，构建号 38 的部署日志）：
 
@@ -873,14 +877,32 @@ wait_for_container "$FRONTEND_CONTAINER" 0   # 前端是 nginx，起来即就绪
 证明了三件事：新代码在**真实服务器**上正常执行；`min_stable=25` 的实际等待就是 26 秒
 （与设计一致）；不误报。顺带确认部署耗时增加了约 26 秒 —— 这是这一层检查的固定成本。
 
-**② 故障路径：还没在服务器上验证过。**
+**② 故障路径：2026-09-21 16:53 在生产被意外触发过，日志就是证据。**
 
-模拟测试证明了判断逻辑正确，但有一个假设是模拟**无法**覆盖的：
+```
+16:50:38 Image tag      : 63c4e717...（构建号 50）
+16:51:30 Container pm-backend healthy: stable 25s (need >= 25s), restarts=0
+16:53:01 Container pm-frontend FAILED health check: status=running, restarts=1, stable=86s (need >= 0s)
+16:53:01 Dumping container status and logs for diagnosis   ← 随后 exit 1
+```
 
-> **在这台服务器的 Docker 上，crash-loop 容器的 `RestartCount` 真的会递增吗？**
+这次回答了那个只有真机才能回答的问题：
 
-这是整套判据的承重点（模拟里正是它拦住了 TEST B）。Docker 的行为众所周知，
-但按 §7.9.3「外部规则必须实测」，它值得被测一次。
+> **在这台服务器的 Docker 上，`RestartCount` 真的会递增吗？** → **会**，实测 `restarts=1`。
+
+而且它验证的正是最关键的那一点：**容器 `status=running`、稳定了 86 秒，看上去完全正常，
+只有 `RestartCount` 把它抓了出来** —— 这跟模拟里 TEST B 的形态一模一样。
+判据的承重假设不再只是模拟结论。
+
+**副作用（顺带解释了另一个现象）**：脚本在健康检查处 `exit 1`，
+因此**没有写 `/var/log/pm-system-current-tag`** —— 那个文件至今停在 `10a1c02`，
+而容器实际跑的是 `63c4e71`。这正是 §7.12 那条"以容器实际镜像为准"的设计理由。
+
+<details>
+<summary>还想做得更彻底：可再跑一次「一次性容器」的刻意测试（可选）</summary>
+
+上面的证据是**意外**撞上的，不是设计好的：它证明判据能拦住真实故障，
+但没有覆盖"后端 crash-loop"这个具体场景。想补上就用零影响的方式测真代码：
 
 **推荐做法：零影响，且测的是真代码**
 
@@ -944,6 +966,7 @@ cp .env.bak .env                          # 恢复
 ```
 
 **验收标准**：部署报失败并打印日志。
+</details>
 
 > 注意：健康检查失败是在 `up -d` **之后**触发的，此时新容器已经起来了。
 > 也就是说**这一层检查保护的是"不会被误报成功"，不是"线上不会被搞坏"**。
@@ -1000,7 +1023,10 @@ cp .env.bak .env                          # 恢复
 
 #### 结果
 
-**`available`：事故前 138 MiB → 加固后 830 MiB（约 6 倍）。** 两个项目 HTTP 200，8 容器全 Up，事故后至今无新 OOM。
+**`available`：事故前 138 MiB → 加固后约 830 MiB（约 6 倍）。** 两个项目 HTTP 200，8 容器全 Up，事故后至今无新 OOM。
+
+> ⚠️ **这个数字是快照，会浮动**：当天不同时刻实测 869 / 830 / 876 MiB。
+> 写文档时别把某一次的值当结论 —— 要写就带上实测时刻，或者写「约 870」。
 
 #### 🔴 排查过程中踩到并固化的三条
 
@@ -1244,6 +1270,13 @@ Skipping deploy: 本次变更未触及应用路径（线上保持 dfd6821c…）
 ```
 跳过时**镜像 tag 不变**（容器一个都没重启），而仓库 HEAD 已同步 —— **代码同步与容器重启被成功解耦**。
 
+**命中计数**（2026-09-21 19:20 实测，两边都远超早前记录的 4 条 / 1 条）：
+
+```bash
+grep -cE '变更触及应用路径|Skipping deploy' /var/log/pm-system-deploy.log    # → 9
+grep -cE '变更触及应用路径|Skipping deploy' /var/log/cloudland-deploy.log    # → 1
+```
+
 ### 7.13 🔴 三个「我以为测对了」的教训（都是同一个模式）
 
 | 我以为 | 真相 | 通则 |
@@ -1276,6 +1309,42 @@ Skipping deploy: 本次变更未触及应用路径（线上保持 dfd6821c…）
 
 ⇒ 带正则 / `$` / 反斜杠的脚本**一律写成文件再跑**（`python -c` 只用于无这些字符的短表达式）；
 **commit message 改用 `git commit -F <文件>`**，完全绕开 shell 转义。
+
+### 7.15 🔴 写了期望状态 ≠ 线上就是那个状态（IaC 漂移的实证）
+
+2026-09-21 19:20 做「文档 vs 实际」核对时发现的真事：
+
+```
+apply/01-docker-daemon.yml 期望状态：live-restore: true
+线上 /etc/docker/daemon.json      ：只有 registry-mirrors（73 字节）
+docker info                       ：Live Restore Enabled: false
+```
+
+**playbook 早就写好并"跑通"了，可线上从来没生效过。**
+回头看 14:06:38 那次 reload 的日志，配置里确实没有 `live-restore` —— 期望状态和真实状态**一直在漂移，而没有任何机制发现**。
+
+**这条为什么重要**：IaC 的价值不在"把配置写进仓库"，而在"线上因此收敛到那个状态"。
+少了漂移检测，playbook 只是一份**看起来很严谨的愿望清单** —— 而且它有很强的欺骗性：
+代码在、注释在、`--check` 会报 `changed=1`，一切都像是对的。
+
+> **教训（可直接复用）**：
+> 1. **不要从"playbook 跑过"推出"线上已收敛"** —— 这两件事之间没有必然联系。
+> 2. **`--check` 报 `changed=1` 就是漂移信号** —— 一个本该幂等的 apply 剧本，
+>    只要演练还说"要改"，就说明线上跟期望状态不一致，别把它当"这次有活干"。
+>    上面这个 `live-restore` 就是靠演练的 diff 抓出来的。
+> 3. **验证要独立于 playbook 自己** —— 它自己说"断言通过"不算数，
+>    再跑一次 `docker info` / `cat` 才是证据。（这次收敛后就是这么复核的。）
+> 4. 根治办法在 §10「IaC 收尾 ②」：**定期自动执行 + 漂移告警**。
+
+**收敛过程**（2026-09-21 19:33，三步闭环，容器零影响）：
+
+| 步骤 | 结果 |
+|---|---|
+| `--check --diff` | `changed=1`，diff 只有一行：`+ "live-restore": true` ← **漂移点** |
+| 实际执行 | `changed=2`，备份 `daemon.json.3364387.2026-09-21@19:33:26~`；断言全过；`docker info` 已反映 `Live Restore Enabled: true`；**所有容器 StartedAt 完全一致**（reload 没重启任何容器） |
+| 再跑一次（幂等） | `changed=0`，未产生新备份 ✅ |
+
+副作用检查：8 容器仍 `Up 3 hours`（未重启），两项目 HTTP 200，`available` 876 MiB。
 
 ---
 
@@ -1332,7 +1401,7 @@ Skipping deploy: 本次变更未触及应用路径（线上保持 dfd6821c…）
 | `playbooks/audit/00-baseline.yml` | 采集主机 / Docker / 配置与凭据 / 调度 / 部署目录的现状 ✅ `changed=0` |
 | `playbooks/audit/02-log-audit.yml` | 审计日志占用（实测容器日志仅 1.4 MiB，非问题） |
 | `playbooks/audit/03-disk-audit.yml` | 审计磁盘（**已剔除 `docker system df`**，全用 `du -shx`） |
-| `playbooks/apply/01-docker-daemon.yml` | 收敛 `daemon.json`（镜像源 + `live-restore`）✅ 演练/执行/幂等三跑通过 |
+| `playbooks/apply/01-docker-daemon.yml` | 收敛 `daemon.json`（镜像源 + `live-restore`）✅ **2026-09-21 19:33 真实执行，把此前从未生效的 `live-restore` 收敛上线**；演练/执行/幂等三跑通过（漂移实证见 §7.15） |
 | `playbooks/apply/04-swap.yml` | 2 GiB swap + fstab（幂等，`/etc/fstab` 有 `backup: true`）✅ 演练 `changed=0` |
 | `playbooks/apply/05-ssh-authorized-keys.yml` | 授权公钥（**regexp 锚在公钥本体**，不是注释字段）✅ 已执行 |
 
@@ -1378,9 +1447,15 @@ cd /root/pm-system && IMAGE_TAG=$(git rev-parse HEAD) docker compose ps
 ### 查"线上到底是哪次提交"
 
 ```bash
-cat /var/log/pm-system-current-tag             # deploy.sh 部署成功后写入
+# ① 权威：容器实际在用的镜像（deploy.sh 的路径守卫也是取这个值）
 docker inspect -f '{{.Config.Image}}' pm-backend
+
+# ② 辅助：仅当上一次部署**完整走完**时才可信 —— 健康检查失败会 exit 1，写不到这个文件
+cat /var/log/pm-system-current-tag
 ```
+
+> ⚠️ **两者不一致时永远信 ①。** 2026-09-21 实测：文件是 `10a1c02`，容器是 `63c4e71`
+> （那次部署在前端健康检查处失败退出，没写成文件 —— 见 §6.3）。
 
 ### 排错三板斧（区分应用问题与网络问题）
 
@@ -1455,7 +1530,7 @@ free -m                         # 关注 available，不是 free
 - [x] **阶段一**：镜像 tag 版本化 + 回滚能力 —— tag 机制已由构建器原始参数直接证实；pm-system 回滚已实测通过（§6.1）
 - [x] ~~阶段一收尾 D：确认构建能正常推送~~ —— **已实测：push 会自动创建仓库，无需手工建**（16:00 那次构建）
 - [x] ~~阶段一收尾 E：`grep 'DIAG GITEE_COMMIT'`~~ —— 已实测有值（构建号 38 那行），并据此改掉了竞态（§7.10）
-- [ ] **阶段一收尾 A**：⚠️ **确认 Cloudland 服务器当前停在哪个版本** —— 14:57 发起过回滚（目标是 `442178c`），若确认了 `yes`，现在线上就在回滚点。查：`cat /var/log/cloudland-current-tag`，若是回滚点则用 `cd /root/cloudland && /bin/bash scripts/deploy.sh main` 带回最新
+- [x] ~~**阶段一收尾 A**：确认 Cloudland 服务器当前停在哪个版本~~ —— **2026-09-21 19:20 实测已确认**：容器镜像 = `/var/log/cloudland-current-tag` = 服务器 HEAD = `add7fe7`（**最新，不在回滚点**），无需带回。顺带确认 Cloudland 回滚能力已具备（部署日志显示 `5ec16e3`、`add7fe7` 两次均成功 pull ⇒ ACR 上至少 2 个 tag；⚠️ 未直接查 ACR 控制台）
 - [ ] **阶段一收尾 B**：清理废弃 `:latest`（若还有）—— 🔴 **必须先点「管理」进入仓库，只删镜像版本列表里 `latest` 那一行，绝不点仓库列表的「删除」**。四个仓库已误删过，重建后可能已无 `latest`
 - [x] ~~阶段一收尾 C：重新积累回滚点~~ —— **已恢复**：ACR 现有 `5c4c5c7`（15:58）与 `0c94da1`（16:20）两个版本；16:20 那次 `current-tag` 与容器镜像双双指向 `0c94da1`，证明部署阶段也成功
 - [x] ~~阶段一收尾：用新 tag 再跑一次回滚做实收~~ —— **已实测通过**（2026-09-15 16:38）
@@ -1467,11 +1542,11 @@ free -m                         # 关注 available，不是 free
 - [ ] **Cloudland 阶段二收尾（可选）**：推一次，在云端确认构建日志里有 `Tests run: 17`
 - [ ] Cloudland：`jwt.expire` / `jwt.week` 默认值相同 → `remember` 不生效（确认业务意图后决定改不改）
 - [ ] Cloudland：`JwtUtils` 由字段注入改构造器注入（可测性）
-- [ ] **阶段三收尾**：故障路径待验证 —— 用「提取真实函数 + 一次性容器」的方式，**零影响**（§6.3 给了完整命令，约 90 秒）。关键看输出里的 `restarts >= 1`
+- [x] ~~**阶段三收尾**：故障路径待验证~~ —— **2026-09-21 16:53 已在生产被意外验证**：前端 `restarts=1` 被拦下，`status=running, stable=86s` 却仍判 FAILED 并 `exit 1` ⇒ 证明 `RestartCount` 在这台机器的 Docker 上确实递增，且是承重判据（§6.3）。**可选补充**：跑 §6.3 里那个「一次性容器」的刻意测试，补上"后端 crash-loop"这个具体场景
 - [ ] 记一笔：`.env` 不参与版本控制，**改过环境变量 schema 之后要重做一次回滚验收**（§6.1 隐性依赖）
 - [ ] 确认 Gitee 图形视图能否用界面配置 `dependsOn`（根治编辑器删字段问题）
 - [x] ~~清理 `backend/Dockerfile` 第 27 行过时注释（写着"测试在 CI 跑"，实际没有）~~ —— 阶段二已顺手修掉，并把测试真的接上了
-- [x] ~~按需：JVM 堆上限 / 加 swap / 升级 ECS 到 4G（§6.4）~~ —— **2026-09-21 事故驱动完成了前三项**（JVM 堆上限 + MySQL 参数 + swap + `mem_limit`）。升级 ECS 仍可选，但余量已回到 830 MiB，不急
+- [x] ~~按需：JVM 堆上限 / 加 swap / 升级 ECS 到 4G（§6.4）~~ —— **2026-09-21 事故驱动完成了前三项**（JVM 堆上限 + MySQL 参数 + swap + `mem_limit`）。升级 ECS 仍可选，但余量已回到约 870 MiB，不急
 - [ ] 🔴 **轮换服务器 root 密码** —— 2026-09-21 排查事故时它曾以明文出现在聊天记录里。SSH 已改为专用密钥（注释 `ai-agent`）认证，密码不再是必需
 - [x] ~~给流水线加路径过滤~~ —— 查证后确认 **Gitee Go 个人版没有这个能力**（那是企业版的功能），改在 `scripts/deploy.sh` 里加路径守卫（§6.4，提交 `dfd6821`）
 - [x] ~~**Cloudland 的 `deploy.sh` 同样加路径守卫**~~ —— **已完成**（`add7fe7`），线上已打印判定记录
@@ -1486,6 +1561,11 @@ free -m                         # 关注 available，不是 free
   现在 6 个 playbook **全靠手动跑**，没有定时、没有流水线触发
   ⇒ 「配置的**描述**在代码里，但**收敛**仍依赖有人记得去跑」。
   **这条就是「基础设施即代码」与「一堆更好的脚本」的分界线。**
+
+  🧾 **已经有一次实证了**（2026-09-21，见 §7.15）：`apply/01` 写了 `live-restore: true`，
+  线上却一直是 `false`，漂移了好几小时没人发现 ——
+  **靠的是一次人工核对 + `--check` 的 diff 才抓出来。**
+  若当时有定时 `--check`，它会在第一次漂移发生后就报出来。
   做法：建一条**只跑探针、不含构建阶段**的独立流水线，用 Gitee Go 的 `triggers.schedule` 定时触发，
   每天跑 `audit/` 的探针 + `apply/` 的 `--check`；**`--check` 报 `changed≠0` 就是漂移信号**（有人手工改了配置）。
   ⚠️ `triggers.schedule` **只在官方文档里见过、尚未实测** —— 按当天教训，**先验证再动流水线文件**
