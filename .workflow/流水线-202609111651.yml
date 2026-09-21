@@ -1,0 +1,100 @@
+version: "1.0"
+name: pm-system-deploy
+displayName: pm-system-deploy
+stages:
+- name: 云端构建镜像
+  displayName: 云端构建镜像
+  strategy: naturally
+  trigger: auto
+  executor: []
+  steps:
+  # ⚠️ 镜像 tag = 本次 push 的完整 commit SHA（GITEE_COMMIT），不再是 latest。
+  #    依据：Gitee 官方《系统级变量》——GITEE_COMMIT 为完整 commit，
+  #    且 build@docker 的「镜像 Tag」字段官方说明支持引用流水线全局变量。
+  #    部署侧 scripts/deploy.sh 用 `git rev-parse HEAD` 取同一值，两者必须一致。
+  # ⚠️ 不要再用网页可视化编辑器保存本文件：编辑器会删注释、删 dependsOn，
+  #    也可能改掉 tag 里的变量。要改就改仓库 YAML 再 push。
+  - step: build@docker
+    name: build_backend_image
+    displayName: 构建后端镜像
+    certificate: "18140213287"
+    repository: "{{CERTIFICATION.18140213287.server}}"
+    username: "{{CERTIFICATION.18140213287.username}}"
+    password: "{{CERTIFICATION.18140213287.password}}"
+    tag: pm-backend:${GITEE_COMMIT}
+    dockerfile: ./backend/Dockerfile
+    isCache: false
+    processorType:
+    - amd64
+    strategy:
+      retry: "0"
+  - step: build@docker
+    name: build_frontend_image
+    displayName: 构建前端镜像
+    certificate: "18140213287"
+    repository: "{{CERTIFICATION.18140213287.server}}"
+    username: "{{CERTIFICATION.18140213287.username}}"
+    password: "{{CERTIFICATION.18140213287.password}}"
+    tag: pm-frontend:${GITEE_COMMIT}
+    dockerfile: ./frontend/Dockerfile
+    isCache: false
+    processorType:
+    - amd64
+    strategy:
+      retry: "0"
+- name: 部署到阿里云主机
+  displayName: 部署到阿里云主机
+  # 质量门禁：必须等构建阶段成功才部署。
+  # ⚠️ Gitee 可视化编辑器保存时会删掉 dependsOn（已发生 3 次）。
+  #    根因：编辑器不识别 YAML 里手写的该字段。
+  #    根治办法：在「图形视图」的阶段设置里用界面配置依赖，编辑器才会保留。
+  dependsOn:
+  - 云端构建镜像
+  strategy: naturally
+  trigger: auto
+  executor:
+  - t1longlive
+  steps:
+  - step: shell@agent
+    name: deploy_aliyun
+    displayName: 执行部署脚本
+    schedulerType: DISTRIBUTED
+    scriptType: SH
+    script: |-
+      set -Eeuo pipefail
+
+      APP_DIR="/root/pm-system"
+      BRANCH="main"
+      REPO_URL="https://gitee.com/t1longlive/pm-system.git"
+
+      if [ ! -d "$APP_DIR/.git" ]; then
+        echo ">> 首次部署：克隆仓库到 $APP_DIR"
+        mkdir -p "$(dirname "$APP_DIR")"
+        git clone -b "$BRANCH" "$REPO_URL" "$APP_DIR"
+      fi
+
+      cd "$APP_DIR"
+      git fetch origin "$BRANCH"
+      git checkout "$BRANCH"
+      git reset --hard "origin/$BRANCH"
+
+      # 镜像 tag 由 scripts/deploy.sh 计算（= git rev-parse HEAD），
+      # 与构建阶段的 ${GITEE_COMMIT} 对应。此处不传 tag，保持单一真相来源。
+      /bin/bash scripts/deploy.sh "$BRANCH"
+    gitClone: "false"
+    hostGroupID:
+      ID: ali_cloudland
+      hostID:
+      - 844d9abd-3fd6-4e32-99ee-3339f2497a55
+    notify: []
+    strategy:
+      retry: "0"
+triggers:
+  trigger: auto
+  push:
+    branches:
+      prefix: []
+      precise:
+      - main
+      include: []
+notify: []
