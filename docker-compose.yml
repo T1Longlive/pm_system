@@ -97,7 +97,21 @@ services:
       #
       # -XX:+UseSerialGC：单线程 GC，不额外起 GC 工作线程（省内存与 CPU）
       # -Xss512k：线程栈从默认 1M 降到 512k（Spring/Tomcat 线程较多）
-      JAVA_TOOL_OPTIONS: "-Xmx320m -XX:+UseSerialGC -Xss512k"
+      #
+      # -XX:+ExitOnOutOfMemoryError：OOM 时**让进程直接退出**，而不是抛个异常继续跑。
+      #   默认行为是「抛 OutOfMemoryError 但进程不死」→ 应用变成半死不活：
+      #   容器状态仍是 Up，部署的健康检查照常放行，可某些功能已经在报 500。
+      #   **这比直接挂掉更难排查。**
+      #   加上它之后：进程退出 → 容器 Exited → restart 策略拉起 → 健康检查发现
+      #   → 重启次数上升（可见）。即 fail-fast 换可观测性。
+      #   代价：若堆确实不够，会变成重启循环。但 Docker 的 restart 是**指数退避**的，
+      #   不会打满 CPU；而且循环本身是明确信号，比"静默降级"好。
+      #
+      # 🔴 已实测两个镜像的 JVM 都支持这个参数（不支持的参数会让 JVM 拒绝启动）：
+      #   pm-backend(Java 17.0.20) / cloudland-backend(Java 8u342) 均返回 0；
+      #   对照给一个假参数会报 `Unrecognized VM option` —— 所以这个验证是决定性的。
+      #   ExitOnOutOfMemoryError 自 JDK 8u92 起提供。
+      JAVA_TOOL_OPTIONS: "-Xmx320m -XX:+UseSerialGC -Xss512k -XX:+ExitOnOutOfMemoryError"
     volumes:
       # 附件持久化：容器重建不丢文件
       - pm-upload:/pm-upload
