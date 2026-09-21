@@ -1,0 +1,154 @@
+---
+# ======================================================================
+# 06-cron-drift-check.yml —— 把「漂移检测的定时执行」纳入 IaC
+# ----------------------------------------------------------------------
+# 这是 01 / 04 / 05 之后第四个会改系统的剧本，也是**让前三个真正持续生效**的那个。
+#
+# 为什么需要它（2026-09-21 的真实教训）
+#   01 号剧本写着 live-restore: true，线上却一直是 false，
+#   漂移好几小时没人发现（交接文档 §7.15）。
+#   根因不是"没写期望状态"，而是**没有人定期去比对**。
+#   定时执行 + 漂移告警，才是「基础设施即代码」与「一堆更好的脚本」的分界线。
+#
+# 为什么是 crontab 而不是流水线的定时触发
+#   先试了 Gitee Go 的 triggers.schedule（官方《触发事件》文档明确支持）：
+#     连续两个触发点都没执行 —— 服务器的 drift 日志一条新记录都没有。
+#   按 §7.9.3「外部规则必须实测」，没生效就是没生效，不再猜字段。
+#   ⇒ 改由服务器 crontab 承担：完全可控、可验证，且它本身正是该被 IaC 管的东西
+#     （交接文档 §10 ③ 里 crontab 一直写着"目前没有"）。
+#
+# ======================================================================
+# 执行方式（与其它 apply 剧本同一套纪律）
+# ======================================================================
+#   ① 演练（只读，一个字节都不写）：
+#      /root/.ansible-venv/bin/ansible-playbook -i inventory.ini \
+#          playbooks/apply/06-cron-drift-check.yml --check --diff
+#   ② 执行：
+#      /root/.ansible-venv/bin/ansible-playbook -i inventory.ini \
+#          playbooks/apply/06-cron-drift-check.yml
+#   ③ 幂等验证：再跑一次必须 changed=0
+#
+#   🔴 例外：cron 模块在 --check 下**不会真的写 crontab**，
+#      所以演练只能证明"它会改什么"，证明不了"改完能跑"。
+#      ⇒ 真正执行后必须**另外验证一次**：见本文件末尾的验证步骤。
+#
+#   临时改成高频用于验证（测完记得改回来）：
+#      ... -e drift_cron_minute='*/5'
+# ======================================================================
+
+- name: 让漂移检测每天自动跑一次
+  hosts: pm_servers
+  # setup 是「被管端解释器能否工作」最早最响的检查点（§7.14）
+  gather_facts: true
+  become: false
+
+  vars:
+    # 默认每天 09:00。分/时都做成变量，是为了能用 -e 临时改成高频做验证。
+    drift_cron_minute: "0"
+    drift_cron_hour: "9"
+    drift_cron_name: "pm-system-drift-check"
+    drift_script: "/root/pm-system/infra/ansible/drift-check.sh"
+    drift_cron_log: "/var/log/pm-system-drift-cron.log"
+
+  tasks:
+
+    # ================================================================
+    # 一、前置检查
+    # ================================================================
+    # 被管端 Python 越界时模块根本不执行、任务却显示 ok ——
+    # 那会导致"剧本说装好了，其实 crontab 里什么都没有"。
+    - name: "前置检查 | 断言被管端 Python 在 ansible-core 的支持区间内"
+      ansible.builtin.assert:
+        that:
+          - ansible_python_version is version('3.8', '>=')
+        fail_msg: >-
+          被管端 Python 是 {{ ansible_python_version }}，低于 ansible-core 2.19
+          要求的 3.8。模块会在被管端静默失败，只留下空的 stdout —— 极难排查。
+          修法：把 inventory.ini 的 ansible_python_interpreter 指向 /usr/bin/python3.11。
+        success_msg: "被管端 Python {{ ansible_python_version }}，在支持区间内。"
+
+    - name: "前置检查 | crond 必须在运行且开机自启"
+      ansible.builtin.command: systemctl is-active crond
+      register: crond_active
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: "前置检查 | 断言 crond 是 active"
+      ansible.builtin.assert:
+        that:
+          - crond_active.stdout == 'active'
+        fail_msg: >-
+          crond 当前不是 active（实际 {{ crond_active.stdout }}）。
+          crontab 写进去也不会跑 —— 先 systemctl enable --now crond。
+        success_msg: "crond active，定时任务写进去就会被调度。"
+
+    # 被管的是什么文件？先确认脚本存在。
+    # 少这一步的话，cron 会老老实实每天去执行一个不存在的脚本，
+    # 而 cron 的执行失败**不会有任何告警** —— 等于买了个假保险。
+    - name: "前置检查 | 确认 drift-check.sh 存在且可执行"
+      ansible.builtin.stat:
+        path: "{{ drift_script }}"
+      register: drift_script_stat
+      check_mode: false
+
+    - name: "前置检查 | 断言脚本存在"
+      ansible.builtin.assert:
+        that:
+          - drift_script_stat.stat.exists
+        fail_msg: >-
+          {{ drift_script }} 不存在。先确认仓库已同步到服务器
+          （部署流水线每次都会 fetch + reset，infra/ 变更虽然跳过部署但代码是同步的）。
+        success_msg: "脚本存在：{{ drift_script }}"
+
+    # ================================================================
+    # 二、应用期望状态
+    # ================================================================
+    # ansible.builtin.cron 是幂等的：靠 name 匹配，同名条目只保留一条。
+    # 这也是为什么必须给它起一个稳定的 name —— 换个名字就会多出一条重复任务。
+    - name: "应用 | 写入 crontab 条目"
+      ansible.builtin.cron:
+        name: "{{ drift_cron_name }}"
+        minute: "{{ drift_cron_minute }}"
+        hour: "{{ drift_cron_hour }}"
+        # 退出码即结论：0 无漂移 / 1 有漂移 / 2 检测出错。cron 不关心，但日志会记。
+        # 输出重定向到独立日志：cron 环境下没有终端，不重定向就什么都看不到。
+        job: "/bin/bash {{ drift_script }} >> {{ drift_cron_log }} 2>&1"
+        user: root
+        state: present
+      register: cron_write
+
+    # ================================================================
+    # 三、验证（只在真的执行后才有意义）
+    # ================================================================
+    - name: "验证 | 读回 crontab"
+      ansible.builtin.command: crontab -l -u root
+      register: crontab_now
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: "验证 | 断言条目存在且只有一条"
+      ansible.builtin.assert:
+        that:
+          - drift_cron_name in crontab_now.stdout
+          - crontab_now.stdout_lines | select('search', drift_cron_name) | list | length == 1
+        fail_msg: >-
+          crontab 里 {{ drift_cron_name }} 的条目数不为 1（当前内容：{{ crontab_now.stdout }}）。
+          重复条目会导致同一时间跑两次；为 0 则说明压根没写进去。
+        success_msg: "crontab 里恰好一条 {{ drift_cron_name }}，无重复。"
+      when: not ansible_check_mode
+
+    # ================================================================
+    # 四、报告
+    # ================================================================
+    - name: "报告 | 本次变更摘要"
+      ansible.builtin.debug:
+        msg:
+          - "运行模式    : {{ '演练（--check，未写入）' if ansible_check_mode else '实际执行' }}"
+          - "是否变更    : {{ '是，crontab 已更新' if cron_write.changed else '否，已是期望状态（幂等命中）' }}"
+          - "计划时间    : {{ drift_cron_hour }}:{{ drift_cron_minute }}（每天）"
+          - "日志        : {{ drift_cron_log }}"
+          - "⚠️ 演练模式证明不了『改完能跑』。真正执行后请另做一次验证："
+          - "   crontab -l | grep drift"
+          - "   临时高频验证：-e drift_cron_minute='*/5'，看日志是否按时长出条目"
