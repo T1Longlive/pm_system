@@ -127,11 +127,15 @@
       ansible.builtin.shell: >-
         test -f {{ auth_keys_file }} || { echo "MISSING"; exit 0; }
         ; echo "mode=$(stat -c %a {{ auth_keys_file }})"
-        ; awk '{print $NF}' {{ auth_keys_file }}
+        ; cat {{ auth_keys_file }}
       register: verify_keys
       changed_when: false
       check_mode: false
       when: not ansible_check_mode
+      # 🔴 必须是 `cat`（打印整行），不能是 `awk '{print $NF}'`（只打印注释）。
+      #    断言是按**公钥本体**计数的；只输出注释的话正则一个也匹配不到，
+      #    断言会恒假、每次执行都误报失败。这个 bug 是首次真实执行时暴露的。
+      #    公钥不是秘密，且本来就入库了，打印完整内容没有泄露问题。
 
     - name: "4/4 | 断言每把公钥恰好一行、且没有残留的坏行"
       ansible.builtin.assert:
@@ -148,7 +152,8 @@
           公钥未达到期望状态（应恰好 1 行，实际见下）。
           可能有手工追加时留下的坏行没被替换掉。
           实际输出：{{ verify_keys.stdout }}
-          回滚：把 {{ (key_results.results | selectattr('backup_file', 'defined') | map(attribute='backup_file') | list | first) | default('authorized_keys 的 .bak') }} 覆盖回去
+          回滚：/root/.ssh/ 下找带时间戳的 authorized_keys.*~ 覆盖回去
+          （backup: true 生成的备份名以 ~ 结尾，**不是 .bak**）
         success_msg: "公钥本体恰好 1 行，无残留坏行。"
       loop: "{{ authorized_keys }}"
       when: not ansible_check_mode
