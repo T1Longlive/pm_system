@@ -1383,6 +1383,9 @@ triggers:
 写进配置 ≠ 会执行。验证方式是用 `-e drift_cron_minute='*/5'` 临时改成每 5 分钟，
 **盯日志长出了两条**（21:05:01、21:10:01）才算数，然后改回每天 09:00、复跑 `changed=0`。
 
+✅ **次日复验通过**（2026-09-22 09:00:02 自动执行，09:03:24 `RESULT: OK`）——
+"高频下会跑"和"每天真的会跑"是两件事，隔了一夜还在跑才算数。
+
 **反向测试（缺了它就是买假保险）**：
 
 | 步骤 | 操作 | 期望 | 实测 |
@@ -1633,10 +1636,9 @@ free -m                         # 关注 available，不是 free
   ⇒ **需要到 Gitee 网页端看**：流水线列表是否多出一条 `pm-system-drift-check`
   （有就删掉），以及额度/配额是否已满。
   临时绕法（已用）：`ssh root@8.137.114.176 'cd /root/pm-system && git fetch origin main && git reset --hard origin/main'`。
-  做法：建一条**只跑探针、不含构建阶段**的独立流水线，用 Gitee Go 的 `triggers.schedule` 定时触发，
-  每天跑 `audit/` 的探针 + `apply/` 的 `--check`；**`--check` 报 `changed≠0` 就是漂移信号**（有人手工改了配置）。
-  ⚠️ `triggers.schedule` **只在官方文档里见过、尚未实测** —— 按当天教训，**先验证再动流水线文件**
-  （那份文件被网页编辑器坑过 4 次，§7.1）。
+
+  2026-09-22 补充诊断：**服务器上的 runner 是活的**（`/root/gitee-go-runner` 进程在，
+  参数里 hostID `844d9abd` 正确）⇒ 问题不在 runner，是**云端没派发任务下来**。
 - [ ] **③ 补齐还缺的配置项** —— logrotate（应用日志切割，目前没有）。
   （~~crontab~~ 已由 `apply/06` 接管，见 ②）
 - [ ] **Cloudland 纳入 IaC** —— `infra/ansible/` 目前只服务 pm-system。两项目同机同架构，共享价值高
