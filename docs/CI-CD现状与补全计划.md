@@ -1450,6 +1450,53 @@ triggers:
 单次时长被拉到最大。改成 `true` 应该能显著缩短单次构建 ——
 ⚠️ **待额度恢复后实测再定**，现在改了也没法验证。
 
+### 7.18 应急通道：绕开云端，本机构建并直接推 ACR
+
+云端构建时长耗尽时（§7.17），镜像不必非得由 Gitee 构建 —— 本机也能建好推到 ACR，
+服务器照常 pull。**前提是本机 Docker 引擎可用。**
+
+**本机环境（2026-09-22 实测）**
+
+| 项 | 值 |
+|---|---|
+| Docker | Client 29.7.2，装在 **`D:\Software\DockerDesktop`**（非默认路径） |
+| 🔴 调用方式 | PATH 里的 `docker` 是 Git Bash 的 wrapper 脚本，依赖缺失的 `sh`，会报 `/usr/bin/env: 'sh': No such file or directory` ⇒ **必须直调 `D:/Software/DockerDesktop/resources/bin/docker.exe`** |
+| 前置 | **Docker Desktop 必须处于启动状态**，否则报 `dockerDesktopLinuxEngine` 管道不存在 |
+| WSL | `wslservice.exe` / `vmcompute.exe` 实测在跑 ⇒ 引擎起得来（"AI 不能执行 wsl.exe" ≠ WSL 不可用） |
+| 磁盘 | C 109 GB / D 87.7 GB 空闲，充足 |
+| ACR 登录 | 本机 `~/.docker/config.json` 的 `auths` 为空 ⇒ 首次需 `docker login` |
+
+**操作步骤**（在仓库根执行，构建上下文固定为仓库根，与云端一致）：
+
+```bash
+DOCKER="D:/Software/DockerDesktop/resources/bin/docker.exe"
+ACR="crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com"
+SHA="$(git rev-parse HEAD)"          # 🔴 tag 必须是完整 SHA，与 deploy.sh 的算法一致
+
+"$DOCKER" login "$ACR"               # 阿里云 ACR：用户名=账号全名，密码=访问控制里设的固定密码
+
+"$DOCKER" build --platform linux/amd64 -f backend/Dockerfile  -t "$ACR/t1longlive/pm-backend:$SHA"  .
+"$DOCKER" build --platform linux/amd64 -f frontend/Dockerfile -t "$ACR/t1longlive/pm-frontend:$SHA" .
+
+"$DOCKER" push "$ACR/t1longlive/pm-backend:$SHA"
+"$DOCKER" push "$ACR/t1longlive/pm-frontend:$SHA"
+```
+
+然后在服务器上（走正常部署脚本，它会自己算 HEAD）：
+
+```bash
+ssh root@8.137.114.176 'cd /root/pm-system && git fetch origin main && git reset --hard origin/main \
+    && /bin/bash scripts/deploy.sh main'
+```
+
+**三个要注意的点**：
+1. **`--platform linux/amd64` 显式写上** —— 服务器是 amd64，本机若哪天换成 ARM（或 Docker Desktop 默认平台变了），
+   不指定会推出架构不匹配的镜像，服务器拉下来直接 `exec format error`。
+2. **别指望这条路径"绕过路径守卫"也不该绕过** —— 如果 `deploy.sh` 判定"未触及应用路径，跳过部署"，
+   说明应用代码没变，**本来就不该重新部署**（镜像内容是一样的）。要强制重建容器另说。
+3. **本机构建会走 `settings.xml` 的阿里云镜像与 npmmirror**，与云端一致，产物等价；
+   但首次要拉基础镜像 + 全量依赖，约 10~20 分钟，之后有本机缓存会快很多。
+
 **crontab 条目里两个容易踩的点**：
 - **重定向必须写**（`>> log 2>&1`）：cron 环境下没有终端，不重定向就什么都看不到，
   而 cron **不会**给你任何失败告警。
