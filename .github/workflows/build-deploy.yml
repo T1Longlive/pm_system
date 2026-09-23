@@ -46,6 +46,27 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 体检：Secrets 是否就位
+        # Secret 缺失时 docker/login-action 只报一句含糊的
+        # "Username and password required"，看不出缺的是哪个。这里先逐个点名。
+        # 用 env 传递而非把 ${{ secrets.X }} 内联进 shell —— 密码里的特殊字符
+        # （$ ` ! 等）内联时会被 shell 解析，env 传递不会。
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for pair in "ACR_USERNAME:$ACR_USERNAME" "ACR_PASSWORD:$ACR_PASSWORD"; do
+            if [ -z "${pair#*:}" ]; then
+              echo "MISSING: ${pair%%:*} —— 去 Settings → Secrets and variables → Actions 添加"
+              missing=1
+            else
+              echo "OK: ${pair%%:*}"
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
       - name: 登录阿里云 ACR
         # 必须先登录：Dockerfile 的 FROM 用的是本项目 ACR 里的私有基础镜像
         # （maven / node / nginx / temurin），未登录会 pull denied。
@@ -85,6 +106,24 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: 体检：部署用 Secrets 是否就位
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for pair in "SERVER_HOST:$SERVER_HOST" "SERVER_USER:$SERVER_USER" "SSH_PRIVATE_KEY:$SSH_PRIVATE_KEY"; do
+            if [ -z "${pair#*:}" ]; then
+              echo "MISSING: ${pair%%:*} —— 去 Settings → Secrets and variables → Actions 添加"
+              missing=1
+            else
+              echo "OK: ${pair%%:*}"
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
       - name: SSH 执行部署脚本
         uses: appleboy/ssh-action@v1
         with:
