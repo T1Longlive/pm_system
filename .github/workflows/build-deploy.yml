@@ -1,0 +1,111 @@
+name: build-and-deploy
+
+# ======================================================================
+# pm-system 主交付流水线（GitHub Actions）
+# ----------------------------------------------------------------------
+# 为什么从 Gitee Go 迁过来（2026-09-23）：
+#   · Gitee Go 个人版每月 500 分钟构建时长，2026-09-21 被烧光后直至 09-23 零触发；
+#   · .workflow/ 下加过第二个 yml 后部署流水线停止触发，撤掉文件也未恢复
+#     （云端流水线是独立对象，删文件 ≠ 删流水线）；
+#   · GHA 免费额度 2000 分钟/月（私有仓库），公开仓库不限，足够本项目。
+#
+# 与 Gitee Go 版的三个关键差异：
+#   1. **原生 paths 过滤**：改 docs/ 根本不触发，比 Gitee 的「提交信息含 [build]」
+#      更精确，且不用记着在提交信息里写关键字。
+#   2. **不再依赖云端构建机拉私有基础镜像的运气**：这里显式 docker login ACR
+#      后再 build，Dockerfile 的 FROM 指向自己的 ACR，认证链明确。
+#   3. **workflow_dispatch**：网页上点一下就能重跑，不用靠空提交触发。
+#
+# ⚠️ 两条铁律（与 deploy.sh 的契约）：
+#   · 镜像 tag = ${{ github.sha }}，与服务器仓库 HEAD 必须是同一个 commit
+#   · GHA 只负责「构建 + 通知服务器」，不直接碰容器 —— 部署逻辑仍在 deploy.sh 里，
+#     这样 Jenkins 备用通道和手动部署走的是同一份脚本，不会出现两套真相
+# ======================================================================
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'docker-compose.yml'
+      - 'scripts/**'
+      - 'settings.xml'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+env:
+  ACR_HOST: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com
+  ACR_NAMESPACE: t1longlive
+
+jobs:
+  build:
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 登录阿里云 ACR
+        # 必须先登录：Dockerfile 的 FROM 用的是本项目 ACR 里的私有基础镜像
+        # （maven / node / nginx / temurin），未登录会 pull denied。
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_HOST }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: 构建并推送后端镜像
+        # 用 docker CLI 而非 build-push-action：前者复用 daemon 的 ~/.docker/config.json，
+        # 私有基础镜像的拉取认证不会丢（buildx 的 docker-container driver 不共享该认证）。
+        run: |
+          set -euo pipefail
+          docker build \
+            -f ./backend/Dockerfile \
+            -t $ACR_HOST/$ACR_NAMESPACE/pm-backend:${{ github.sha }} \
+            .
+          docker push $ACR_HOST/$ACR_NAMESPACE/pm-backend:${{ github.sha }}
+
+      - name: 构建并推送前端镜像
+        run: |
+          set -euo pipefail
+          docker build \
+            -f ./frontend/Dockerfile \
+            -t $ACR_HOST/$ACR_NAMESPACE/pm-frontend:${{ github.sha }} \
+            .
+          docker push $ACR_HOST/$ACR_NAMESPACE/pm-frontend:${{ github.sha }}
+
+      - name: 输出本次制品
+        run: |
+          echo "backend  : $ACR_HOST/$ACR_NAMESPACE/pm-backend:${{ github.sha }}"
+          echo "frontend : $ACR_HOST/$ACR_NAMESPACE/pm-frontend:${{ github.sha }}"
+
+  deploy:
+    name: 部署到阿里云 ECS
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH 执行部署脚本
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd /root/pm-system
+            # 先同步代码再执行脚本 —— 否则 deploy.sh 内部的 git reset --hard
+            # 会把「正在执行的自己」覆盖掉，bash 后续读到的行可能与开头不一致。
+            # 同步后 deploy.sh 自己的 fetch/reset 就是 no-op，不会再覆盖自身。
+            git fetch origin main
+            git reset --hard origin/main
+            # IMAGE_TAG 由 CI 显式指定 —— 服务器不再用 git rev-parse HEAD 去猜。
+            # 这样「跑哪个版本的镜像」与「服务器仓库同步到哪」解耦：
+            # 即使代码同步慢一步，也不会拉错 tag（过去这是 pull 失败的主要来源）。
+            export IMAGE_TAG=${{ github.sha }}
+            # CI_COMMIT_SHA 供 deploy.sh 的竞态守卫使用
+            # （构建期间又有新 push 时跳过本次部署，交给更新的那次流水线）
+            export CI_COMMIT_SHA=${{ github.sha }}
+            /bin/bash scripts/deploy.sh main

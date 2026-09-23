@@ -90,8 +90,13 @@ else
   #   · 强制锚定 GITEE_COMMIT 部署旧提交 → 可能在新版本之后才落地，
   #     把线上**顺序倒退**成旧版本（静默，且危险）
   #   · 跳过则两种坏结果都不会发生：线上不动，更新的那条流水线负责上线
-  if [ -n "${GITEE_COMMIT:-}" ] && [ "$GITEE_COMMIT" != "$(git rev-parse "origin/$BRANCH")" ]; then
-    log "Skipping deploy: built commit ${GITEE_COMMIT} is no longer the tip of ${BRANCH}"
+  # CI 注入的「本次构建所对应的提交」，两个名字都认：
+  #   GitHub Actions → CI_COMMIT_SHA（由 .github/workflows/build-deploy.yml 显式传入）
+  #   Gitee Go       → GITEE_COMMIT（流水线环境变量自动注入）
+  # 兼容两个名字是为了让 Jenkins / Gitee 备用通道无需改动即可继续工作。
+  CI_COMMIT="${CI_COMMIT_SHA:-${GITEE_COMMIT:-}}"
+  if [ -n "$CI_COMMIT" ] && [ "$CI_COMMIT" != "$(git rev-parse "origin/$BRANCH")" ]; then
+    log "Skipping deploy: built commit $CI_COMMIT is no longer the tip of $BRANCH"
     log "  分支最新已是 $(git rev-parse "origin/$BRANCH")，说明构建期间又有 push。"
     log "  本次不动线上 —— 那条更新的流水线会负责部署最新版本。"
     exit 0
