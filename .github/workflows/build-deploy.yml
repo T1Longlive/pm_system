@@ -91,17 +91,22 @@ jobs:
 
       - name: Trivy 扫描后端镜像
         # 扫的是刚构建完的本地镜像，扫不过就不往下推 —— 漏洞制品不进仓库。
-        # 🔴 exit-code 先设 '0'（只报告不阻断）：第一次要摸清基线有多少、都是什么，
-        #    直接阻断的话大概率天天红，红到最后没人看反而等于没装。
-        #    基线清楚后再改成 '1' 变硬门禁。
+        #
+        # exit-code '1' = 硬门禁（2026-09-24 启用）。
+        #   启用前的两步摸底：首轮报 41 条（CRITICAL 8 / HIGH 33），
+        #   升 Spring Boot 4.1.1 + 覆盖 Tomcat 11.0.25 后降到 3 条 CRITICAL，
+        #   再转存基础镜像后归零。基线清楚了才敢改硬门禁 ——
+        #   一开始就直接阻断，只会天天红，红到没人看等于没装。
+        #
         # ignore-unfixed: 上游还没出修复版本的漏洞先放过（我们无从修，只能接受风险）。
+        # 个别需要长期放过的走仓库根的 .trivyignore（每条必须写理由和复查条件）。
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: pm-backend:${{ github.sha }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
           ignore-unfixed: true
-          exit-code: '0'
+          exit-code: '1'
 
       - name: 推送后端镜像
         run: |
@@ -124,7 +129,7 @@ jobs:
           format: 'table'
           severity: 'CRITICAL,HIGH'
           ignore-unfixed: true
-          exit-code: '0'
+          exit-code: '1'
 
       - name: 推送前端镜像
         run: |
