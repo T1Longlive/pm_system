@@ -79,24 +79,57 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: 构建并推送后端镜像
+      - name: 构建后端镜像（先不推送）
         # 用 docker CLI 而非 build-push-action：前者复用 daemon 的 ~/.docker/config.json，
         # 私有基础镜像的拉取认证不会丢（buildx 的 docker-container driver 不共享该认证）。
         run: |
           set -euo pipefail
           docker build \
             -f ./backend/Dockerfile \
-            -t $ACR_HOST/$ACR_NAMESPACE/pm-backend:${{ github.sha }} \
+            -t pm-backend:${{ github.sha }} \
             .
+
+      - name: Trivy 扫描后端镜像
+        # 扫的是刚构建完的本地镜像，扫不过就不往下推 —— 漏洞制品不进仓库。
+        # 🔴 exit-code 先设 '0'（只报告不阻断）：第一次要摸清基线有多少、都是什么，
+        #    直接阻断的话大概率天天红，红到最后没人看反而等于没装。
+        #    基线清楚后再改成 '1' 变硬门禁。
+        # ignore-unfixed: 上游还没出修复版本的漏洞先放过（我们无从修，只能接受风险）。
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: pm-backend:${{ github.sha }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: 推送后端镜像
+        run: |
+          set -euo pipefail
+          docker tag pm-backend:${{ github.sha }} $ACR_HOST/$ACR_NAMESPACE/pm-backend:${{ github.sha }}
           docker push $ACR_HOST/$ACR_NAMESPACE/pm-backend:${{ github.sha }}
 
-      - name: 构建并推送前端镜像
+      - name: 构建前端镜像（先不推送）
         run: |
           set -euo pipefail
           docker build \
             -f ./frontend/Dockerfile \
-            -t $ACR_HOST/$ACR_NAMESPACE/pm-frontend:${{ github.sha }} \
+            -t pm-frontend:${{ github.sha }} \
             .
+
+      - name: Trivy 扫描前端镜像
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: pm-frontend:${{ github.sha }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: 推送前端镜像
+        run: |
+          set -euo pipefail
+          docker tag pm-frontend:${{ github.sha }} $ACR_HOST/$ACR_NAMESPACE/pm-frontend:${{ github.sha }}
           docker push $ACR_HOST/$ACR_NAMESPACE/pm-frontend:${{ github.sha }}
 
       - name: 输出本次制品
