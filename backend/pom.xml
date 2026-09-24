@@ -8,7 +8,21 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.2.5</version>
+        <!--
+          Spring Boot 4.1.1（2026-09 升级）
+
+          为什么升：原 3.2.5 的 OSS 支持已于 2024-12-31 结束，整个 3.x 分支
+          （含 3.5，2026-06-30 EOL）都不再有安全补丁。Trivy 首次扫描后端镜像报出
+          41 条漏洞（CRITICAL 8 / HIGH 33），其中两条 CRITICAL 来自 Spring Boot
+          内置的组件：
+            · tomcat-embed-core  CVE-2025-24813（RCE，10.1.20 → 修 10.1.35）
+            · netty-handler      CVE-2026-75595
+          这些靠重新拉基础镜像解决不了 —— 版本是 Spring Boot 的 BOM 决定的，
+          只能升 Spring Boot。
+
+          Spring Boot 4.x 基线：Spring Framework 7 + Jackson 3，仍支持 Java 17。
+        -->
+        <version>4.1.1</version>
         <relativePath/>
     </parent>
 
@@ -21,7 +35,13 @@
     <properties>
         <!-- 本机为 JDK 18，编译目标为 17（Spring Boot 3 最低要求） -->
         <java.version>17</java.version>
-        <mybatis-plus.version>3.5.5</mybatis-plus.version>
+        <!-- 升到 MyBatis-Plus 3.5.17：3.5.15+ 才正式兼容 Spring Boot 4 -->
+        <mybatis-plus.version>3.5.17</mybatis-plus.version>
+        <!--
+          ⚠️ jjwt 暂时保留 0.11.5：0.12.x 起 API 有 breaking change
+          （parserBuilder() → parser()），单独升更安全。本轮先把 Spring Boot 4
+          跑通，再单独处理 jjwt 与 Jackson 3 的共存问题。
+        -->
         <jjwt.version>0.11.5</jjwt.version>
     </properties>
 
@@ -38,10 +58,25 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
-        <!-- MyBatis-Plus（Spring Boot 3 专用 starter） -->
+        <!--
+          MyBatis-Plus：starter 的 artifactId 绑定 Spring Boot 大版本，
+          Boot 3 用 -spring-boot3-starter，Boot 4 必须换成 -spring-boot4-starter，
+          否则自动配置不生效（表现为 @Mapper 扫不到、NoSuchBeanDefinition）。
+        -->
         <dependency>
             <groupId>com.baomidou</groupId>
-            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+            <artifactId>mybatis-plus-spring-boot4-starter</artifactId>
+            <version>${mybatis-plus.version}</version>
+        </dependency>
+
+        <!--
+          分页插件：自 MyBatis-Plus 3.5.9 起，PaginationInnerInterceptor 从核心包
+          拆了出来，必须显式引入本模块，否则编译报「找不到符号 PaginationInnerInterceptor」。
+          版本必须与 starter 保持一致。
+        -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-jsqlparser</artifactId>
             <version>${mybatis-plus.version}</version>
         </dependency>
 

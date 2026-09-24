@@ -1,6 +1,8 @@
 package com.pm.security;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+// Jackson 3（Spring Boot 4 基线）：包名从 com.fasterxml.jackson 换成 tools.jackson。
+// 这里只用到 writeValue()，API 本身没变，改 import 即可。
+import tools.jackson.databind.ObjectMapper;
 import com.pm.common.Result;
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.http.HttpServletRequest;
