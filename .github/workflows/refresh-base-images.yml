@@ -1,0 +1,78 @@
+name: refresh-base-images
+
+# ======================================================================
+# 重新转存 4 个基础镜像到本项目 ACR
+# ----------------------------------------------------------------------
+# 【为什么需要这个流水线】
+#   基础镜像是「快照」：转存到 ACR 后就不会自动更新，上游修复 CVE 我们也拿不到。
+#   Trivy 扫出来的漏洞里，凡是来自基础镜像层的（前端 alpine 的 libexpat/libuuid、
+#   后端 Go stdlib），靠重新转存就能消掉。
+#
+# 【为什么在这里做，而不是在服务器上跑 mirror-base-images.sh】
+#   2026-09-24 实测：服务器已无法访问 Docker Hub
+#     Get "https://registry-1.docker.io/v2/": net/http: request canceled
+#   它配的加速源 docker.1panel.live 也已失效。
+#   而 GitHub Actions 的 runner 能正常访问 Docker Hub —— 所以转存放这里。
+#   仓库里的 scripts/mirror-base-images.sh 仍在，仅供服务器能访问时手动使用。
+#
+# 【什么时候跑】
+#   手动（workflow_dispatch）。想自动化的话把下面 schedule 的注释打开即可，
+#   每月 1 号跑一次就够，不必更频繁。
+# ======================================================================
+
+on:
+  # schedule:
+  #   - cron: '0 3 1 * *'
+  workflow_dispatch:
+
+env:
+  ACR_HOST: crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com
+  ACR_NAMESPACE: t1longlive
+
+jobs:
+  refresh:
+    name: 重新转存基础镜像
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 登录阿里云 ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_HOST }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: 转存 4 个基础镜像
+        # 逐个处理，失败不中断（某个镜像拉不到不影响其他的）
+        run: |
+          set -uo pipefail
+          fail=0
+          for img in \
+            maven:3.9-eclipse-temurin-17 \
+            eclipse-temurin:17-jre \
+            node:20-alpine \
+            nginx:alpine
+          do
+            target="$ACR_HOST/$ACR_NAMESPACE/$img"
+            echo "----------------------------------------"
+            echo ">> $img -> $target"
+            if docker pull "$img"; then
+              docker tag "$img" "$target"
+              if docker push "$target"; then
+                echo "   OK"
+              else
+                echo "   PUSH FAILED"; fail=1
+              fi
+            else
+              echo "   PULL FAILED"; fail=1
+            fi
+          done
+          echo "========================================"
+          [ "$fail" -eq 0 ] && echo "全部转存完成" || { echo "部分失败，见上方日志"; exit 1; }
+
+      - name: 输出本次拉取到的版本
+        run: |
+          for img in maven:3.9-eclipse-temurin-17 eclipse-temurin:17-jre node:20-alpine nginx:alpine; do
+            printf '%-34s ' "$img"
+            docker inspect -f '{{.Id}}' "$img" 2>/dev/null | cut -c1-20 || echo "(n/a)"
+          done
