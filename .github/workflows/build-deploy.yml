@@ -42,6 +42,9 @@ jobs:
   build:
     name: 构建并推送镜像
     runs-on: ubuntu-latest
+    # 默认上限 360 分钟太宽松：一旦卡死（依赖源挂、镜像 pull 卡住）会空转烧掉大量额度。
+    # 两个镜像冷构建实测 10~20 分钟，30 分钟足够且留了余量。
+    timeout-minutes: 30
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -105,6 +108,9 @@ jobs:
     name: 部署到阿里云 ECS
     needs: build
     runs-on: ubuntu-latest
+    # 部署只是 SSH + 拉镜像 + 健康检查，正常 2~3 分钟。
+    # 给 10 分钟：SSH 连不上时会一直重试到超时，别让整个流水线挂太久。
+    timeout-minutes: 10
     steps:
       - name: 体检：部署用 Secrets 是否就位
         env:
