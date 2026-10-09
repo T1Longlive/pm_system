@@ -46,6 +46,27 @@
           在 properties 里覆盖即可，等官方升到 4.1.2+ 就可以删掉这段。
         -->
         <tomcat.version>11.0.25</tomcat.version>
+
+        <!--
+          覆盖 Jackson 版本（Spring Boot 4.1.1 默认：jackson-2 = 2.21.5、jackson-3 = 3.1.5）。
+
+          为什么：2026-10-09 Trivy 扫出 10 条 HIGH，全是 DoS 类、且都「有修复版本」
+          （所以 ignore-unfixed 拦不住，硬门禁直接红）。注意这不是代码变更引起的 ——
+          同一个 commit 在 09-24 扫是干净的，是漏洞库后来收录/上调了这些 CVE：
+            · com.fasterxml.jackson.core:jackson-core      2.21.5 → 修复 2.21.7
+            · com.fasterxml.jackson.core:jackson-databind          → 修复 2.21.6
+            · tools.jackson.core:jackson-core              3.1.5  → 修复 3.1.7
+            · tools.jackson.core:jackson-databind                  → 修复 3.1.6
+          取 2.21.7 / 3.1.7 覆盖两条 minor 线的全部所需补丁，都是 patch 级升级，
+          兼容风险最低。等官方 BOM 收录后即可删除本段。
+
+          ⚠️ 属性名反直觉，别改错（已核对 spring-boot-dependencies 4.1.1 原文）：
+            jackson-2-bom.version → com.fasterxml.jackson:jackson-bom （Jackson 2.x）
+            jackson-bom.version   → tools.jackson:jackson-bom       （Jackson 3.x）
+        -->
+        <jackson-2-bom.version>2.21.7</jackson-2-bom.version>
+        <jackson-bom.version>3.1.7</jackson-bom.version>
+
         <!--
           ⚠️ jjwt 暂时保留 0.11.5：0.12.x 起 API 有 breaking change
           （parserBuilder() → parser()），单独升更安全。本轮先把 Spring Boot 4
