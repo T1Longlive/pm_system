@@ -48,6 +48,35 @@ FROM crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/eclips
 # 时区设为东八区，否则日志时间戳会是 UTC
 ENV TZ=Asia/Shanghai
 
+# ---------- 清掉基础镜像里两个会持续腐化的点 ----------
+# 【背景】基础镜像是「快照」，上游修了 CVE 我们不会自动拿到。
+# 2026-10-09 ~ 10-10 连续两次被 Trivy 硬门禁拦下，剩下的 6 条**全部来自这一层**，
+# 与业务代码无关（应用依赖那 10 条 Jackson 已在 pom 里覆盖解决）。
+#
+# ① openssl 家族（libssl3t64 / openssl / openssl-provider-legacy）
+#    镜像里带的是 3.5.5-1ubuntu3.5，ubuntu 已发布 3.5.5-1ubuntu3.6
+#    （CVE-2026-84782，DTLS 握手重传导致信息泄露）。
+#    ⇒ 用 apt-get upgrade 拉取 ubuntu 安全更新。
+#    ⚠️ 代价：构建不再逐字节可复现（不同时间构建拿到的补丁版本不同）。
+#       这里有意接受 —— 安全补丁的时效性优先，而且基础镜像本身的 tag 也是浮动的，
+#       真要严格复现得锁 digest，那是另一件事。
+#
+# ② /usr/bin/pebble 的 Go stdlib
+#    pebble 是 Let's Encrypt 的 ACME **测试服务器**，随 Temurin 镜像附带，
+#    本应用完全不用它。它由上游用固定 Go 版本编译，我们无法单独升级 ——
+#    留着就只能一直等 Temurin 重建镜像，同时白背一个用不到的攻击面。
+#    ⇒ 直接删除。顺带缩小镜像体积。
+#
+# 【复查条件】若将来这里又报出新 CVE：
+#   · 先确认 ① 的 upgrade 是否仍在执行（构建日志里搜 "apt-get upgrade"）；
+#   · 若报的是 pebble 且路径变了，用下面命令核对实际路径：
+#       docker run --rm --entrypoint sh <image> -c 'command -v pebble'
+#   · 上游 Temurin 若某天不再打包 pebble，这段 rm 会静默变成空操作，无害。
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+ && rm -f /usr/bin/pebble \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # 从构建阶段只取最终的 jar
