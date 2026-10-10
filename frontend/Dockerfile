@@ -31,6 +31,17 @@ FROM crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com/t1longlive/nginx:
 
 ENV TZ=Asia/Shanghai
 
+# ---------- 拉取 alpine 安全更新 ----------
+# 基础镜像是「快照」，上游修了 CVE 我们不会自动拿到。2026-10-10 这一层被 Trivy
+# 硬门禁拦下 2 条（与业务代码无关）：
+#   · pcre2 10.48-r0 → 10.49-r0（CVE-2026-103111，构造正则触发越界写）
+#   · tiff  4.7.1-r0 → 4.7.2-r0（CVE-2026-4775，整数溢出导致任意代码执行）
+# ⇒ apk upgrade 拉取 alpine 3.24 仓库里的最新补丁版本。
+# 与 backend/Dockerfile 里的 apt-get upgrade 是同一套思路。
+# ⚠️ 代价：构建不再逐字节可复现 —— 有意接受，安全补丁的时效性优先。
+# 注：nginx 本身由官方镜像编译安装，不归 apk 管，upgrade 不会动它。
+RUN apk upgrade --no-cache
+
 # 用项目自己的 nginx 配置替换默认配置
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 
