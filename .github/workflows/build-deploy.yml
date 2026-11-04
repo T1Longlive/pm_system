@@ -3,17 +3,13 @@ name: build-and-deploy
 # ======================================================================
 # pm-system 主交付流水线（GitHub Actions）
 # ----------------------------------------------------------------------
-# 为什么从 Gitee Go 迁过来（2026-09-23）：
-#   · Gitee Go 个人版每月 500 分钟构建时长，2026-09-21 被烧光后直至 09-23 零触发；
-#   · .workflow/ 下加过第二个 yml 后部署流水线停止触发，撤掉文件也未恢复
-#     （云端流水线是独立对象，删文件 ≠ 删流水线）；
-#   · GHA 免费额度 2000 分钟/月（私有仓库），公开仓库不限，足够本项目。
+# 历史：最初使用 Gitee Go，因个人版构建额度耗尽、触发不稳定，2026-09-23 迁到
+# GitHub Actions；Gitee 相关配置已于 2026-11-04 全部移除。
 #
-# 与 Gitee Go 版的三个关键差异：
-#   1. **原生 paths 过滤**：改 docs/ 根本不触发，比 Gitee 的「提交信息含 [build]」
-#      更精确，且不用记着在提交信息里写关键字。
-#   2. **不再依赖云端构建机拉私有基础镜像的运气**：这里显式 docker login ACR
-#      后再 build，Dockerfile 的 FROM 指向自己的 ACR，认证链明确。
+# 相比原 Gitee 版的三个关键点：
+#   1. **原生 paths 过滤**：只改 docs/ 或 infra/ 不会触发构建。
+#   2. **显式认证链**：先 docker login ACR 再 build，Dockerfile 的 FROM 指向
+#      自己的 ACR（基础镜像来源固定），不依赖构建机的网络运气。
 #   3. **workflow_dispatch**：网页上点一下就能重跑，不用靠空提交触发。
 #
 # ⚠️ 两条铁律（与 deploy.sh 的契约）：
@@ -175,9 +171,12 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
-          script_stop: true
           script: |
             set -euo pipefail
+            # appleboy/ssh-action 的远程 shell 不会设置登录用户的 HOME（实测为空/非 /root）。
+            # 不显式设置的话，git 的 ssh 读不到 /root/.ssh/config 与部署密钥，
+            # docker 也读不到 /root/.docker/config.json 里的 ACR 登录凭据。
+            export HOME=/root
             cd /root/pm-system
             # 先同步代码再执行脚本 —— 否则 deploy.sh 内部的 git reset --hard
             # 会把「正在执行的自己」覆盖掉，bash 后续读到的行可能与开头不一致。
