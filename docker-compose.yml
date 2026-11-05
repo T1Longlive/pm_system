@@ -54,7 +54,6 @@
 #        IMAGE_TAG=$(git rev-parse HEAD) docker compose ps
 # ======================================================================
 
-# 2026-11-05：自动部署链路验证（仅注释，不改运行行为）
 services:
   backend:
     # 镜像由 GitHub Actions 构建并推送到阿里云 ACR
