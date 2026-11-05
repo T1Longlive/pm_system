@@ -16,7 +16,7 @@
 #
 # 根因是**结构性超配**（数字是实测的）：
 #   宿主机           1870 MiB
-#   非容器底座       ~250 MiB（阿里云盾 / 宝塔 / Gitee runner / dockerd / containerd / journald）
+#   非容器底座       ~250 MiB（阿里云盾 / 宝塔 / CI runner / dockerd / containerd / journald）
 #   每套栈原占用     ~725 MiB（Java ~350 + MySQL ~360 + Redis + nginx）
 #   两套栈           1450 MiB
 #   ⇒ 1450 + 250 = 1700 MiB，对着 1870 MiB 的机器，可用余量只有 138 MiB
@@ -54,12 +54,13 @@
 #        IMAGE_TAG=$(git rev-parse HEAD) docker compose ps
 # ======================================================================
 
+# 2026-11-05：自动部署链路验证（仅注释，不改运行行为）
 services:
   backend:
-    # 镜像由 Gitee 云端构建并推送到阿里云 ACR
-    # （见 .workflow/流水线-*.yml 里的 build@docker 步骤）
+    # 镜像由 GitHub Actions 构建并推送到阿里云 ACR
+    # （见 .github/workflows/build-deploy.yml）
     # 服务器只 pull + up，不再本地编译 —— 这是方案 B 的核心。
-    # ⚠️ 地址中的 t1longlive 是 Gitee 个人空间地址，Gitee Go 会用它作 ACR 命名空间
+    # ⚠️ 地址中的 t1longlive 只是 ACR 命名空间，与代码托管平台无关
     #
     # tag 不再写死 latest，而是按 IMAGE_TAG 取（= commit SHA）。
     # IMAGE_TAG 由 scripts/deploy.sh 计算并 export，绝不在 .env 里定义。

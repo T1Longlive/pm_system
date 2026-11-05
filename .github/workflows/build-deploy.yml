@@ -139,7 +139,7 @@ jobs:
           echo "frontend : $ACR_HOST/$ACR_NAMESPACE/pm-frontend:${{ github.sha }}"
 
   deploy:
-    name: 部署到阿里云 ECS
+    name: 部署到腾讯云服务器
     needs: build
     runs-on: ubuntu-latest
     # 部署只是 SSH + 拉镜像 + 健康检查，正常 2~3 分钟。
