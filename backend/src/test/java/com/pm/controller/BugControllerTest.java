@@ -12,6 +12,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.util.List;
+
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -82,6 +84,34 @@ class BugControllerTest {
                         .requestAttr("userId", 9L))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(400));
+    }
+
+    @Test
+    @DisplayName("截图：成功追加返回新附件 id 列表")
+    void addImagesSuccess() throws Exception {
+        when(bugService.addImages(eq(9L), eq(1L), any())).thenReturn(List.of(11L, 12L));
+
+        mockMvc.perform(post("/api/bugs/1/images")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"images\":[{\"url\":\"/upload/a.png\",\"fileName\":\"a.png\","
+                                + "\"fileType\":\"IMAGE\",\"fileSize\":10}]}")
+                        .requestAttr("userId", 9L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0]").value(11))
+                .andExpect(jsonPath("$.data[1]").value(12));
+
+        verify(bugService).addImages(eq(9L), eq(1L), any());
+    }
+
+    @Test
+    @DisplayName("删除单张截图：路径变量与当前用户透传")
+    void deleteImage() throws Exception {
+        mockMvc.perform(delete("/api/bugs/1/images/5")
+                        .requestAttr("userId", 9L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        verify(bugService).deleteImage(9L, 1L, 5L);
     }
 
     @Test

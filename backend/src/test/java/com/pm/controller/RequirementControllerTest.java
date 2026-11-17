@@ -3,6 +3,7 @@ package com.pm.controller;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.pm.common.BizException;
 import com.pm.service.RequirementService;
+import com.pm.vo.OperationLogVO;
 import com.pm.vo.RequirementDetailVO;
 import com.pm.vo.RequirementListVO;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,6 +15,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.util.List;
+
 import static org.hamcrest.Matchers.startsWith;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -23,6 +26,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -129,5 +133,68 @@ class RequirementControllerTest {
         mockMvc.perform(get("/api/requirements/7").requestAttr("userId", 9L))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(200));
+    }
+
+    @Test
+    @DisplayName("操作日志：路径 id 与当前用户透传，按时间线返回")
+    void logsBindPathAndUser() throws Exception {
+        OperationLogVO log = new OperationLogVO();
+        log.setAction("CREATE");
+        log.setRemark("创建需求");
+        when(requirementService.listLogs(7L, 9L)).thenReturn(List.of(log));
+
+        mockMvc.perform(get("/api/requirements/7/logs").requestAttr("userId", 9L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].action").value("CREATE"))
+                .andExpect(jsonPath("$.data[0].remark").value("创建需求"));
+
+        verify(requirementService).listLogs(7L, 9L);
+    }
+
+    @Test
+    @DisplayName("编辑：缺少 updatedAt → 400（乐观锁版本必填）")
+    void updateValidation() throws Exception {
+        mockMvc.perform(put("/api/requirements/7")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"新标题\"}")
+                        .requestAttr("userId", 9L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(400));
+    }
+
+    @Test
+    @DisplayName("编辑成功：路径 id 与当前用户透传")
+    void updateSuccess() throws Exception {
+        mockMvc.perform(put("/api/requirements/7")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"新标题\",\"updatedAt\":123}")
+                        .requestAttr("userId", 9L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        verify(requirementService).updateRequirement(eq(9L), eq(7L), any());
+    }
+
+    @Test
+    @DisplayName("取消成功：原因非空时透传，返回 200")
+    void cancelSuccess() throws Exception {
+        mockMvc.perform(post("/api/requirements/7/cancel")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reason\":\"需求作废\"}")
+                        .requestAttr("userId", 9L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        verify(requirementService).cancelRequirement(eq(9L), eq(7L), any());
+    }
+
+    @Test
+    @DisplayName("归档：路径 id 与当前用户透传")
+    void archiveSuccess() throws Exception {
+        mockMvc.perform(post("/api/requirements/7/archive").requestAttr("userId", 9L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        verify(requirementService).archiveRequirement(9L, 7L);
     }
 }

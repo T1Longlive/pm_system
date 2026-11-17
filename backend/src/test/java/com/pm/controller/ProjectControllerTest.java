@@ -134,6 +134,32 @@ class ProjectControllerTest {
     }
 
     @Test
+    @DisplayName("编辑成功：路径 id 与当前用户透传")
+    void updateSuccess() throws Exception {
+        mockMvc.perform(put("/api/projects/1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"新项目名\",\"description\":\"新描述\"}")
+                        .requestAttr("userId", 9L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        verify(projectService).updateProject(eq(9L), eq(1L), any());
+    }
+
+    @Test
+    @DisplayName("添加成员成功：工种列表透传")
+    void addMemberSuccess() throws Exception {
+        mockMvc.perform(post("/api/projects/1/members")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"userId\":2,\"crafts\":[\"FE\",\"QA\"]}")
+                        .requestAttr("userId", 9L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        verify(projectService).addMember(eq(9L), eq(1L), any());
+    }
+
+    @Test
     @DisplayName("添加成员：工种为空 → 400")
     void addMemberValidation() throws Exception {
         mockMvc.perform(post("/api/projects/1/members")
