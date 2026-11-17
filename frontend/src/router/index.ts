@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useUserStore } from '@/stores/user'
+import { authGuard } from './guard'
 
 // 路由元信息扩展：admin 标记管理员专属页面（守卫按此拦截非管理员）
 declare module 'vue-router' {
@@ -101,36 +102,7 @@ const router = createRouter({
   ]
 })
 
-// 全局前置守卫：无 token（未登录）一律重定向到登录页；刷新后 userInfo 缺失时回填
-router.beforeEach(async (to) => {
-  const userStore = useUserStore()
-  // 自愈漂移：pinia 有 token 但 localStorage 已被清（401 过期/手动清除）→ 同步登出状态
-  if (userStore.token && !localStorage.getItem('token')) {
-    userStore.logout()
-  }
-  if (to.path !== '/login' && !userStore.token) {
-    return { path: '/login' }
-  }
-  // 有 token 但用户信息丢失（如旧会话升级），调 /auth/me 回填
-  if (to.path !== '/login' && userStore.token && !userStore.userInfo) {
-    try {
-      await userStore.fetchUserInfo()
-    } catch {
-      // 回填失败（token 失效等）由响应拦截器统一处理跳登录
-    }
-  }
-  // 管理员专属页面（meta.admin）：非管理员重定向回工作台
-  if (to.meta.admin && userStore.userInfo?.isAdmin !== 1) {
-    return { path: '/dashboard' }
-  }
-  // 强制改密拦截：需改密用户只能停留在改密页（改密完成或登出前无法访问其他页面）
-  if (to.path !== '/change-password' && userStore.token && userStore.forceChangePwd) {
-    return { path: '/change-password' }
-  }
-  // 已无强制改密需求的用户访问改密页：回工作台
-  if (to.path === '/change-password' && !userStore.forceChangePwd) {
-    return { path: '/dashboard' }
-  }
-})
+// 全局前置守卫：规则见 router/guard.ts（抽成纯函数便于单测覆盖）
+router.beforeEach((to) => authGuard(to, useUserStore()))
 
 export default router

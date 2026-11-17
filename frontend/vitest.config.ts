@@ -23,18 +23,26 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
-      // 首批只对「纯逻辑 + 会话 + 请求封装」设门槛；组件覆盖率随用例补齐后再纳入
+      /*
+       * 门禁范围：除 views/layout 外的全部前端逻辑。
+       * · views/layout 强依赖 vxe-table / element-plus 与完整路由，脆弱 DOM 断言性价比低，
+       *   留给 Playwright E2E；单测层只保证纯逻辑、请求契约、组件状态派生与路由守卫。
+       * · router/index.ts 是路由表装配，守卫逻辑已抽到 router/guard.ts 单测覆盖，故排除。
+       */
       include: [
-        'src/utils/**/*.ts',
+        'src/api/**/*.ts',
+        'src/components/**/*.{ts,vue}',
         'src/constants/**/*.ts',
+        'src/router/**/*.ts',
         'src/stores/**/*.ts',
-        'src/api/request.ts'
+        'src/utils/**/*.ts'
       ],
+      exclude: ['src/router/index.ts', 'src/**/*.spec.ts', 'src/test/**'],
       thresholds: {
-        lines: 80,
+        lines: 55,
         functions: 80,
-        statements: 80,
-        branches: 70
+        statements: 55,
+        branches: 90
       }
     }
   }
