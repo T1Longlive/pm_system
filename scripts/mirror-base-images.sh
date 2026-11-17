@@ -3,19 +3,18 @@
 # 把 4 个基础镜像转存到本项目自己的 ACR
 # ----------------------------------------------------------------------
 # 【为什么需要】
-#   Gitee 云端构建（build@docker / buildkit）**无法访问 Docker Hub**，
-#   Dockerfile 里直接写 FROM maven:... 会报：
-#     dial tcp 128.242.245.253:80: i/o timeout
-#   把这些基础镜像转存到本项目 ACR 后，云端就能拉取 —— 而 ACR 的
-#   可达性是已经确定的（我们本来就在往它推镜像）。
-#   顺带好处：基础镜像来源被固定下来，供应链可控。
+#   Dockerfile 的 FROM 指向本项目 ACR，而不是 Docker Hub —— 避免构建时
+#   依赖 Docker Hub 的可用性，同时把基础镜像来源固定下来，供应链可控。
+#   这些基础镜像必须先转存进 ACR，构建才能拉取。
 #
-# 【在哪执行】
-#   在**阿里云服务器**上执行（服务器的 Docker 已配镜像加速，能拉到
-#   Docker Hub 的镜像）。
+# 【首选方式】
+#   GitHub Actions 的 .github/workflows/refresh-base-images.yml 每月 1 号
+#   自动转存（也可手动 workflow_dispatch）。本脚本是手工兜底，
+#   只在当前机器能访问 Docker Hub 时使用。
 #
 # 【什么时候执行】
-#   只需在基础镜像的版本发生变化时重跑。日常部署不需要。
+#   只需在基础镜像的版本发生变化或需要拉取上游安全更新时重跑。
+#   日常部署不需要。
 #
 # 【前置】
 #   docker login crpi-jzqyelh9p5zb0dmu.cn-chengdu.personal.cr.aliyuncs.com
@@ -66,7 +65,7 @@ if [ "$fail" -eq 0 ]; then
   echo "✓ 全部 4 个基础镜像已转存到 ACR"
   echo
   echo "下一步：两个 Dockerfile 的 FROM 已指向 ${ACR}/${NS}/...，"
-  echo "        可以回 Gitee 重新运行流水线了。"
+  echo "        可以回 GitHub Actions 手动重跑构建流水线了。"
 else
   echo "✗ 有镜像处理失败，请按上面提示排查后重跑本脚本"
   exit 1

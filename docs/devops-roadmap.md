@@ -1,5 +1,10 @@
 # pm-system DevOps 落地路线图
 
+> 🔴 **2026-11-04 更新：本文是历史规划文档。**
+> 文中「首选 Gitee Go」的结论已被现实推翻：Gitee Go 已整体移除，现行 CI/CD 只使用
+> GitHub Actions（`.github/workflows/build-deploy.yml` → ACR → SSH 执行 `scripts/deploy.sh`）。
+> 下方关于 Gitee Go 的选型、额度、主机组等内容仅作复盘参考，不再执行。
+
 > 目标:以本项目为载体,从零建立一套**可运行、可验证**的 DevOps 工作流,而不是堆概念。
 > 定位:学习驱动 + 真实可用。每一阶段都要有能亲眼看到的产出,而不是"配好了但没跑过"。
 

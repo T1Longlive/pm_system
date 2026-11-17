@@ -4,9 +4,10 @@
 # 阶段 1 builder：Node 构建出 dist/
 # 阶段 2 runtime：nginx 托管静态文件 + 反向代理 /api 到后端
 #
-# 🔴 基础镜像为什么不用 docker.io：Gitee 云端构建无法访问 Docker Hub
-#    （i/o timeout），故基础镜像已镜像到本项目 ACR，见
-#    scripts/mirror-base-images.sh
+# 🔴 基础镜像为什么不用 docker.io：基础镜像统一转存到本项目 ACR，
+#    避免构建时依赖 Docker Hub 的可用性，也固定了镜像来源。
+#    转存由 .github/workflows/refresh-base-images.yml 每月自动执行，
+#    手工兜底见 scripts/mirror-base-images.sh
 # ======================================================================
 
 # ---------- 阶段 1：构建 ----------

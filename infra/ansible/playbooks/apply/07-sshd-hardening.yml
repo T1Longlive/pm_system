@@ -1,0 +1,181 @@
+---
+# ======================================================================
+# apply/07-sshd-hardening.yml —— 让「能用什么方式登录这台机器」进入版本控制
+# ----------------------------------------------------------------------
+# 为什么有这个文件
+# ----------------
+# 2026-09-29 只读排查发现：
+#   - sshd 开着 passwordauthentication yes + permitrootlogin yes，且机器有公网 IP
+#   - /var/log/secure 当周 Failed password **1301** 次，单 IP 47.94.106.198 贡献 473 次
+#   - lastb 显示 120.48.90.166 每 2 分钟扫一遍用户名字典（orlando/git/info1/root/stream）
+#   - 但 Accepted password = 0、Accepted publickey = 10
+#     ⇒ **从来没有任何人用密码登录成功过**
+#
+# 「从没成功过」是这次改动能零风险落地的唯一依据：
+#   关掉密码认证，依赖登录的三方（用户本机 / AI / GitHub Actions）全走公钥，
+#   所以格外的收获是 —— 1301 次爆破当场从「有可能猜中」变成「数学上不可能」。
+#
+# ⚠️ 本 playbook **不碰公网 22 端口**。
+#    原因：部署链路是 GitHub Actions runner **主动 SSH 打进来**跑 deploy.sh。
+#    关掉公网 22 = 流水线直接死。（这一点曾被误判过一次，务必记住。）
+#    若将来要做到「零公网端口」，得先把部署通道换成 Workbench CLI 或服务器轮询，
+#    那是另一个量级的改造，不在本文件范围内。
+#
+# 退出凭证 / 回滚：
+#   cp /etc/ssh/sshd_config.bak-20260929 /etc/ssh/sshd_config && systemctl reload sshd
+#   万一 SSH 彻底连不上：阿里云控制台 → Workbench 网页版（走 100.104.0.0/16 内网 +
+#   云助手，**不依赖 SSH**），从那里改回来。
+#
+# 执行方式：
+#   cd /root/pm-system/infra/ansible
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/07-sshd-hardening.yml --check --diff
+#   /root/.ansible-venv/bin/ansible-playbook -i inventory.ini playbooks/apply/07-sshd-hardening.yml
+# ======================================================================
+
+- name: 收敛 sshd 登录方式（禁密码认证，仅保留公钥）
+  hosts: pm_servers
+  gather_facts: true
+  become: false
+
+  vars:
+    sshd_config: /etc/ssh/sshd_config
+    sshd_service: sshd
+
+    # 期望生效的参数。这里只收两个，其余保持发行版默认。
+    # 🔴 刻意不再往前推（比如改成 permitrootlogin no）：
+    #    root 直登 + 公钥 + 关密码，风险已经收敛到可接受；
+    #    改成建专用 sudo 用户要连带改 GHA 的 SERVER_USER secret、deploy.sh、
+    #    以及所有文档里的路径写法，收益配不上改造面积和出错概率。
+    # value   = 写进配置文件的写法
+    # accepts = sshd -T 可能回显的形态。🔴 两者可能不同：
+    #   sshd 会把某些值**规范化后**回显。实测 PermitRootLogin 写 prohibit-password，
+    #   sshd -T 却输出旧别名 without-password —— 断言按 value 硬匹配会永假。
+    #   （2026-09-29 首次 --check 演练时就是这个断言炸的，改完才通过。）
+    sshd_expects:
+      - key: PasswordAuthentication
+        value: "no"
+        accepts:
+          - "no"
+      - key: PermitRootLogin
+        value: "prohibit-password"
+        accepts:
+          - "prohibit-password"
+          - "without-password"
+
+  tasks:
+
+    # ================================================================
+    # 零、前置检查
+    # ================================================================
+    - name: "零 | 断言被管端 Python 在 ansible-core 的支持区间内"
+      ansible.builtin.assert:
+        that:
+          - ansible_python_version is version('3.8', '>=')
+        fail_msg: >-
+          被管端 Python 是 {{ ansible_python_version }}，低于 ansible-core 2.19
+          要求的 3.8。模块会在被管端静默失败、只留下空 stdout。
+          修法：inventory.ini 的 ansible_python_interpreter 指向 /usr/bin/python3.11。
+        success_msg: "被管端 Python {{ ansible_python_version }}，在支持区间内。"
+
+    - name: "零 | 断言 sshd 配置文件存在"
+      ansible.builtin.stat:
+        path: "{{ sshd_config }}"
+      register: sshd_conf_stat
+      failed_when: not sshd_conf_stat.stat.exists
+
+    # ================================================================
+    # 一、改写两项配置
+    # ================================================================
+    # 🔴 OpenSSH 对重复关键字取「第一次出现的值」。
+    #    lineinfile 替换的是**最后**一个匹配行 —— 所以如果文件里既有注释掉的
+    #    默认值又有真实生效值，只改最后一行是不彻底的。
+    #    ⇒ 这里的 regexp 同时匹配注释行（'^#?\s*Key'），让幂等收敛不留隐患；
+    #      后面第四节用 sshd -T 读「真实生效值」兜底校验。
+    - name: "1/3 | 收敛 sshd 登录参数"
+      ansible.builtin.lineinfile:
+        path: "{{ sshd_config }}"
+        regexp: '^#?\s*{{ item.key }}\s+'
+        line: "{{ item.key }} {{ item.value }}"
+        state: present
+        owner: root
+        group: root
+        mode: "0600"
+        backup: true
+      loop: "{{ sshd_expects }}"
+      register: sshd_lines
+      notify: reload sshd
+
+    # ================================================================
+    # 二、改动后必须先过语法校验，再动服务
+    # ================================================================
+    # sshd -t 是唯一能拦住「配置写错 → reload 失败 → 把自己锁在门外」的手段。
+    # 放在 reload **之前**，且失败即中止整个 playbook。
+    - name: "2/3 | sshd 配置语法校验"
+      ansible.builtin.command: "{{ sshd_service }} -t"
+      register: sshd_syntax
+      changed_when: false
+      check_mode: false
+
+    - name: "2/3 | 语法有误则立即中止（不 reload）"
+      ansible.builtin.assert:
+        that:
+          - sshd_syntax.rc == 0
+        fail_msg: >-
+          sshd 配置语法校验失败，已中止、未 reload，线上 SSH 连接未受影响。
+          修法：回滚 {{ sshd_config }} 的备份（backup: true 生成的文件以 ~ 结尾），
+          或用阿里云控制台 Workbench 网页版进机器改回来。
+          错误输出：{{ sshd_syntax.stderr }}
+        success_msg: "sshd 配置语法校验通过。"
+
+    # ================================================================
+    # 三、读回「真实生效值」并断言
+    # ================================================================
+    # 🔴 必须查 sshd -T（运行实例的实际生效值），**不能查文件内容**：
+    #    文件里有重复关键字时，看到的文未必是 sshd 真正采纳的。
+    - name: "3/3 | 读取 sshd 实际生效配置"
+      ansible.builtin.command: "{{ sshd_service }} -T"
+      register: sshd_effective
+      changed_when: false
+      check_mode: false
+
+    - name: "3/3 | 断言每项参数均已生效"
+      ansible.builtin.assert:
+        that:
+          - >-
+            sshd_effective.stdout_lines
+            | select('match', item.key | lower ~ ' (' ~ (item.accepts | join('|')) ~ ')$')
+            | list | length >= 1
+        fail_msg: >-
+          期望 {{ item.key }} {{ item.value }}，但 sshd 实际未生效。
+          sshd -T 输出：{{ sshd_effective.stdout }}
+        success_msg: "{{ item.key }} {{ item.value }} 已生效。"
+      loop: "{{ sshd_expects }}"
+
+    # 🔴 这里查**文件系统**而不是注册变量里的 backup_file：
+    #    实测（2026-09-29 反向测试）文件确实生成了备份，但
+    #    `sshd_lines.results | selectattr('backup_file','defined')` 取出来是空 ——
+    #    报告显示「备份文件: []」而磁盘上明明有。
+    #    回滚信息不能是这样的假阴性 ⇒ 以磁盘为准，顺带把手工备份也一并列出。
+    - name: "4/4 | 列出真实存在的 sshd_config 备份"
+      ansible.builtin.shell: >-
+        ls -1t {{ sshd_config }}.bak-* {{ sshd_config }}.*~ 2>/dev/null || echo "（无备份）"
+      register: sshd_backups
+      changed_when: false
+      check_mode: false
+
+    - name: "报告 | 本次变更摘要"
+      ansible.builtin.debug:
+        msg:
+          - "运行模式  : {{ '演练（--check）' if ansible_check_mode else '实际执行' }}"
+          - "变更行数  : {{ sshd_lines.results | selectattr('changed') | list | length }}"
+          - "可用备份  : {{ sshd_backups.stdout_lines | default([], true) }}"
+          - "⚠️ 本 playbook 不动公网 22 端口 —— GHA 部署依赖 runner SSH 打进来"
+
+  handlers:
+
+    # 用 reload（SIGHUP）而不是 restart：已建立的连接不受影响。
+    # 一旦这里写错导致断连，还有阿里云控制台 Workbench 网页版兜底。
+    - name: reload sshd
+      ansible.builtin.service:
+        name: "{{ sshd_service }}"
+        state: reloaded

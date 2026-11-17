@@ -5,11 +5,10 @@
 # 阶段 2 runtime：只带 JRE + jar，镜像小、攻击面小
 #
 # 🔴 基础镜像为什么不用 docker.io：
-#    Gitee 云端构建（build@docker / buildkit）**无法访问 Docker Hub**
-#    （registry-1.docker.io 直连 i/o timeout）。
-#    因此这些基础镜像已镜像到本项目自己的 ACR，
-#    既保证云端可拉取，也顺带把基础镜像的来源固定下来（供应链可控）。
-#    镜像到 ACR 的命令见 scripts/mirror-base-images.sh
+#    这些基础镜像已统一转存到本项目自己的 ACR，
+#    既避免构建时依赖 Docker Hub 的可用性，也把基础镜像来源固定下来（供应链可控）。
+#    转存由 .github/workflows/refresh-base-images.yml 每月自动执行，
+#    手工兜底见 scripts/mirror-base-images.sh
 #
 # 关键点：Maven settings.xml 通过 build context 传入，走阿里云镜像加速依赖下载。
 # ======================================================================

@@ -15,8 +15,8 @@
 #   IMAGE_TAG=<tag> scripts/deploy.sh       # 强制指定镜像 tag（逃生口，一般不用）
 #
 # 镜像 tag 的真相来源只有一个：当前工作区的 HEAD。
-#   构建阶段（Gitee 云端）打 tag = ${GITEE_COMMIT}（= 本次 push 的完整 commit）
-#   部署阶段（本脚本）   算 tag = git rev-parse HEAD
+#   构建阶段（GitHub Actions）打 tag = ${GITHUB_SHA}（= 本次 push 的完整 commit）
+#   部署阶段（本脚本）     算 tag = git rev-parse HEAD
 #   两者是同一个值，前提是部署时 origin/<branch> 没有被更晚的 push 覆盖。
 #   若发生覆盖，pull 会失败并给出明确提示 —— 宁可报错，不部署错版本。
 # ======================================================================
@@ -80,21 +80,18 @@ if [ -n "$TARGET_COMMIT" ]; then
 else
   # 正常模式：先判断「本次构建是不是已经过期」。
   #
-  # GITEE_COMMIT 是流水线注入的、本次构建所对应的提交（已实测在 shell@agent 里可读）。
+  # CI_COMMIT_SHA 是流水线注入的、本次构建所对应的提交。
   # 若它已不等于分支最新，说明构建期间又有新 push 进来 —— 本次**跳过部署**，
   # 交给那条更新的流水线去上线。
   #
   # 为什么不"照旧部署"、也不"强制部署旧提交"：
   #   · 照旧部署（reset --hard origin/BRANCH）会拿到新代码、却去拉旧提交的镜像
   #     → pull 报 manifest unknown，白跑一次（吵，但至少安全）
-  #   · 强制锚定 GITEE_COMMIT 部署旧提交 → 可能在新版本之后才落地，
+  #   · 强制锚定 CI_COMMIT_SHA 部署旧提交 → 可能在新版本之后才落地，
   #     把线上**顺序倒退**成旧版本（静默，且危险）
   #   · 跳过则两种坏结果都不会发生：线上不动，更新的那条流水线负责上线
-  # CI 注入的「本次构建所对应的提交」，两个名字都认：
-  #   GitHub Actions → CI_COMMIT_SHA（由 .github/workflows/build-deploy.yml 显式传入）
-  #   Gitee Go       → GITEE_COMMIT（流水线环境变量自动注入）
-  # 兼容两个名字是为了让 Jenkins / Gitee 备用通道无需改动即可继续工作。
-  CI_COMMIT="${CI_COMMIT_SHA:-${GITEE_COMMIT:-}}"
+  # GitHub Actions → CI_COMMIT_SHA（由 .github/workflows/build-deploy.yml 显式传入）
+  CI_COMMIT="${CI_COMMIT_SHA:-}"
   if [ -n "$CI_COMMIT" ] && [ "$CI_COMMIT" != "$(git rev-parse "origin/$BRANCH")" ]; then
     log "Skipping deploy: built commit $CI_COMMIT is no longer the tip of $BRANCH"
     log "  分支最新已是 $(git rev-parse "origin/$BRANCH")，说明构建期间又有 push。"
@@ -109,7 +106,7 @@ fi
 # ---------- 计算镜像 tag ----------
 # 只有两种来源，顺序不能颠倒：
 #   1) 环境变量 IMAGE_TAG —— 运维手工指定（逃生口）
-#   2) git rev-parse HEAD —— 当前代码版本，与云端构建使用的 ${GITEE_COMMIT} 对应
+#   2) git rev-parse HEAD —— 当前代码版本，与云端构建使用的 ${GITHUB_SHA} 对应
 if [ -n "${IMAGE_TAG:-}" ]; then
   TAG_SOURCE="env IMAGE_TAG"
 else
@@ -124,34 +121,28 @@ if [ -n "$TARGET_COMMIT" ]; then
   log "HEAD subject   : $(git log -1 --format=%s HEAD)"
 fi
 
-# ---------- 审计记录：本次部署来自哪条流水线 / 哪个提交 ----------
-# 已实测（2026-09-15）：GITEE_COMMIT / GITEE_BRANCH / GITEE_PIPELINE_BUILD_NUMBER
-# 在 shell@agent 里**都能读到**（此前文档里"不保证能读到"的判断是错的）。
+# ---------- 审计记录：本次部署来自哪次构建 / 哪个提交 ----------
 # 这行保留下来当审计线索：出问题时能直接对上是"哪次构建"把它推上线的。
 # 手工执行（回滚、手动部署）时必然为空，显示 <unset>，属正常。
-log "DIAG GITEE_COMMIT=${GITEE_COMMIT:-<unset>} GITEE_BRANCH=${GITEE_BRANCH:-<unset>} GITEE_PIPELINE_BUILD_NUMBER=${GITEE_PIPELINE_BUILD_NUMBER:-<unset>}"
+log "DIAG CI_COMMIT_SHA=${CI_COMMIT_SHA:-<unset>}"
 
 # ---------- 路径守卫：本次变更真的需要重新部署吗 ----------
 # 为什么需要这一步
 # ----------------
-# 流水线的触发条件只有「push 到 main」，**没有路径过滤** —— 改 docs/ 或 infra/
-# 也会走完整的构建 + 容器重建。
-#   构建浪费的是云端分钟数；而**容器重建才是危险的那一半**：
-#   2026-09-21 的 OOM 雪崩正是在容器重建的内存尖峰上被放大的
-#   （那天推了 6 次，每次都让两个 JVM 冷启动一遍）。
+# GitHub Actions 的 push 触发已按 paths 过滤（只改 docs/ 或 infra/ 不会触发构建），
+# 但手工执行、workflow_dispatch 重跑、或一次提交里同时夹带应用与非应用改动时，
+# 仍会走到容器重建。**容器重建才是危险的那一半**：
+# 2026-09-21 的 OOM 雪崩正是在容器重建的内存尖峰上被放大的
+# （那天推了 6 次，每次都让两个 JVM 冷启动一遍）。
 #
-# 🔴 为什么守卫放在这里，而不是去改流水线的 triggers
-#   Gitee Go（个人版）的 push 触发只支持「分支 / Tag / 提交注释」三种匹配，
-#   **没有文件路径过滤** —— 那是 Gitee 企业版流水线的能力。
-#   在 triggers 里猜一个字段名，最坏情况是整个触发配置失效 →
-#   完全不再自动部署，那比"多部署几次"严重得多。
-#   放在这里则完全在版本控制内：可 review、可测试、不会被网页编辑器改掉。
+# 守卫放在这里而不是流水线 triggers：手动、回滚、备用通道都走同一份脚本，
+# 规则完全在版本控制内，可 review、可测试，不会出现两套判定。
 #
 # 判定方向刻意用「黑名单」（只有**全部**变更都落在非应用路径下才跳过）：
 #   漏判的后果偏向"多部署一次"（无害），而不是"该部署却跳过了"（危险）。
 if [ -z "$TARGET_COMMIT" ]; then
   # 回滚模式（TARGET_COMMIT 非空）不参与此判断 —— 回滚是有意倒退，必须执行。
-  NON_APP_PATHS='^(docs/|infra/|\.workflow/|\.gitee/|\.github/|[^/]+\.md$|LICENSE$|\.gitignore$|\.gitattributes$)'
+  NON_APP_PATHS='^(docs/|infra/|\.github/|[^/]+\.md$|LICENSE$|\.gitignore$|\.gitattributes$)'
 
   # 「当前线上跑的是哪个版本」以**容器实际使用的镜像 tag** 为准 ——
   # 它比任何日志文件都真实（手工 docker compose up 不会更新日志文件）。
@@ -192,7 +183,7 @@ log "Pulling dependency images"
 $DC pull mysql redis || true
 
 # ---------- 拉取应用镜像（方案 B：来自云端构建产物）----------
-# 镜像由 Gitee 云端构建（build@docker）推送到 ACR，服务器只拉取运行，
+# 镜像由 GitHub Actions 构建并推送到 ACR，服务器只拉取运行，
 # 不再本地编译 —— 因此不再需要 Maven / Node，也没有本地编译的内存峰值。
 #
 # pull 必须在 `up -d` 之前，且失败必须直接退出：这样线上旧容器完全不受影响。
@@ -207,7 +198,7 @@ if ! $DC pull backend frontend; then
   log "         docker manifest inspect $REGISTRY/pm-backend:$IMAGE_TAG"
   log "         docker manifest inspect $REGISTRY/pm-frontend:$IMAGE_TAG"
   log "       常见原因："
-  log "         1) 构建阶段 tag 变量没生效，推上去的不是这个 SHA（查构建日志里 buildctl 的 -t 参数）"
+  log "         1) 构建阶段 tag 变量没生效，推上去的不是这个 SHA（查 GitHub Actions 构建日志里的 docker push 命令）"
   log "         2) 部署期间又有新 push，HEAD 已不是构建时那个 commit（看上面的 DIAG 行）"
   log "         3) 本机未 docker login $ACR_HOST"
   exit 1

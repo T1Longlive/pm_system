@@ -1,5 +1,11 @@
 # CI/CD 现状与补全计划
 
+> 🔴 **2026-11-04 更新：Gitee Go 阶段已废弃。**
+> 仓库已删除 `.workflow/` 流水线文件并移除 `gitee` 远程，CI/CD 只保留 GitHub Actions：
+> `.github/workflows/build-deploy.yml` 负责构建并推送 ACR，再 SSH 到服务器执行 `scripts/deploy.sh`。
+> 下文凡涉及 Gitee Go、`GITEE_COMMIT`、主机组 `ali_cloudland`、Gitee runner 的内容，
+> 均为 2026-09 的历史记录，仅用于复盘，**不再适用于当前部署**。
+
 > **这份文档是给「新对话」用的交接材料。** 目的是让一个完全没有上下文的新会话（人或 AI）
 > 读完这一份就能立刻上手，不必重新摸索。
 >
@@ -1511,7 +1517,8 @@ ssh root@8.137.114.176 'cd /root/pm-system && git fetch origin main && git reset
 
 | 文件 | 作用 |
 |---|---|
-| `.workflow/流水线-202609111651.yml` | 流水线：`build@docker`×2（tag=`${GITEE_COMMIT}`）+ `shell@agent` 部署，`dependsOn` 门禁；🔴 **只有提交信息含 `[build]` 才构建**（§7.17，省构建时长） |
+| `.github/workflows/build-deploy.yml` | **现行唯一流水线**：push `main`（带 paths 过滤）或手动触发 → 构建前后端镜像（tag=`${{ github.sha }}`）→ Trivy 硬门禁 → 推 ACR → SSH 到服务器执行 `scripts/deploy.sh` |
+| ~~`.workflow/流水线-202609111651.yml`~~ | **已删除（2026-11-04）**：原 Gitee Go 流水线，历史记录见 §7.17、§8.1 旧版本 |
 | `docker-compose.yml` | 4 服务；backend/frontend 用 ACR 镜像 + `${IMAGE_TAG:?}`；mysql 挂了 `init.sql`；🔴 **每个服务都有 `mem_limit`、backend 有 JVM 堆上限 —— 都是事故后加的，不要删（§6.4）** |
 | `backend/Dockerfile` | 多阶段：`maven:3.9-eclipse-temurin-17` → `eclipse-temurin:17-jre`，FROM 均为 ACR；**`mvn clean package` 不带 `-DskipTests`**（测试即门禁） |
 | `backend/src/test/.../RequirementStageServiceImplTest.java` | **需求阶段派生纯单测**（17 用例）—— 核心业务规则 |

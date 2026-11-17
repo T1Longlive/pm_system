@@ -208,7 +208,7 @@ Terraform 管资源供给、Ansible 管服务器配置。幂等性是核心。�
 
 | 维度 | 你的现状 | 行业对标 |
 |---|---|---|
-| 范式 | Push 式（Gitee Go → ACR → ECS） | 档位 1 的标准做法，选对了 |
+| 范式 | Push 式（GitHub Actions → ACR → ECS） | 档位 1 的标准做法，选对了 |
 | 制品 | 镜像 tag = commit SHA | ✅ 符合最佳实践 |
 | 回滚 | `scripts/rollback.sh` + 不可变 tag | ✅ 有 |
 | 质量门禁 | 24 个单测在云端跑 | ✅ 有 |
