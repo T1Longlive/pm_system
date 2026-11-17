@@ -16,6 +16,12 @@ import { uploadFile } from '@/api/file'
 import { CRAFT_OPTIONS } from '@/constants/craft'
 import { PRIORITY_OPTIONS } from '@/constants/requirement'
 import { useUserStore } from '@/stores/user'
+import {
+  collectAttachments,
+  collectParticipants,
+  isCreatableProject,
+  type ParticipantRow
+} from '@/utils/requirementForm'
 
 const props = defineProps<{
   // 弹窗显隐（v-model）
@@ -46,9 +52,7 @@ const visible = computed({
 const isEdit = computed(() => !!props.editData)
 
 // 新增模式下可选项目：用户担任 PM 或策划的项目（权限矩阵：新增需求限 PM/策划）
-const creatableProjects = computed(() =>
-  props.projects.filter((p) => p.myRole.includes('PM') || p.myRole.includes('PLANNER'))
-)
+const creatableProjects = computed(() => props.projects.filter(isCreatableProject))
 
 // ===== 表单数据 =====
 const formRef = ref<FormInstance>()
@@ -83,10 +87,6 @@ const descriptionHtml = ref('')
 const attachments = ref<ReqAttachment[]>([])
 
 // 参与人行：工种 + 该工种成员多选
-interface ParticipantRow {
-  craft: string
-  userIds: number[]
-}
 const participantRows = ref<ParticipantRow[]>([])
 
 // 所选项目的成员列表（参与人/策划下拉数据源）
@@ -313,23 +313,9 @@ const handleSubmit = async () => {
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
   // 参与人行：剔除未选人员的空行，展平为 userId × craft 列表（同人同工种去重）
-  const seen = new Set<string>()
-  const participants = participantRows.value
-    .filter((row) => row.craft && row.userIds.length)
-    .flatMap((row) => row.userIds.map((userId) => ({ userId, craft: row.craft })))
-    .filter((p) => {
-      const key = `${p.craft}-${p.userId}`
-      if (seen.has(key)) return false
-      seen.add(key)
-      return true
-    })
+  const participants = collectParticipants(participantRows.value)
   // 附件提交时仅传契约字段（不带 id）
-  const submitAttachments = attachments.value.map(({ url, fileName, fileType, fileSize }) => ({
-    url,
-    fileName,
-    fileType,
-    fileSize
-  }))
+  const submitAttachments = collectAttachments(attachments.value)
   submitting.value = true
   try {
     if (isEdit.value && props.editData) {

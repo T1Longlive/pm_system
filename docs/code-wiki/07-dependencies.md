@@ -111,14 +111,14 @@ constants/* ──► 被 views/components 引用（状态/工种/Bug 进度文�
 | 后端单元 + 架构 | `mvn test` | 不依赖外部资源；镜像构建执行这一层 |
 | 后端集成 | `mvn verify` | Failsafe 执行 `*IT`，Testcontainers 启动 MySQL 8 / Redis 7；JaCoCo `check` 覆盖率门禁 |
 | 前端单元 | `npm run test:unit:ci` | Vitest + Vue Test Utils + v8 覆盖率 |
-| 前端 E2E | `npm run test:e2e:local` | Playwright；脚本自动起 `docker-compose.e2e.yml`（MySQL/Redis）+ 后端 18080 + 前端 5173，覆盖登录/主链路/权限；连已有环境用 `E2E_BASE_URL=... npm run test:e2e`（未设置时自动跳过） |
+| 前端 E2E | `npm run test:e2e:local` | Playwright；脚本自动起 `docker-compose.e2e.yml`（MySQL/Redis）+ 后端 18080 + 前端 5173，覆盖登录/守卫、主链路、强制改密、全局搜索、通知已读、日志筛选、需求表单创建、需求池加入月表、权限、排期格子与工期自动保存、乐观锁 409 冲突回滚、需求取消、Bug 逐格编辑持久化、管理端新增人员并登录、日历维护后排期灰显；连已有环境用 `E2E_BASE_URL=... npm run test:e2e`（未设置时自动跳过） |
 | CI | `.github/workflows/test.yml` | PR / main 触发：后端 `verify` + 前端单测与构建 |
 
 测试支撑：`AbstractIntegrationTest`（容器生命周期）、`Fixtures` / `TestDates`（造数）、`TestClock`（可拨动时间）、`MybatisPlusTestSupport`（纯单测的 Lambda 缓存初始化）。
 
 覆盖率门禁：后端整体行覆盖 ≥80%；`RequirementStageServiceImpl` ≥80%、`ScheduleServiceImpl` ≥65%、`BugServiceImpl` ≥85%、`ProjectServiceImpl` ≥85%、`OperationLogServiceImpl` ≥75%、`NotificationServiceImpl` ≥90%、`FileServiceImpl` / `JwtInterceptor` ≥90%。
 
-前端单测门禁：统计 `api` / `components` / `constants` / `router`（守卫）/ `stores` / `utils`，行与语句 ≥55%、函数 ≥80%、分支 ≥90%；`views` / `layout` 强依赖 vxe-table 与完整路由，留给 Playwright E2E，`router/index.ts`（路由表装配）排除。
+前端单测门禁：统计 `api` / `components` / `constants` / `router`（守卫）/ `stores` / `utils`，行与语句 ≥90%、函数 ≥80%、分支 ≥90%；`views` 页面层已有 Requirements / Bugs / RequirementDetail / OperationLogs / Projects / ProjectDetail / AdminUsers / Reports / Dashboard / Schedule / AdminCalendar / Login / ChangePassword 的编排与交互测试（不进覆盖率分母），`components/RequirementFormDialog` 通过 el-form / el-select / wangEditor 桩件覆盖新增/编辑提交、附件与 409 冲突；jsdom 下 `el-table` 不渲染行、`el-form` 校验不稳定、`el-select`（含分页内部选择器）会递归更新，故这些点用桩件或直接调用 setup 处理函数（排期页的行保存/顺延/409、离开拦截同样直接驱动 setup 逻辑），真实交互（表格行内编辑、乐观锁冲突、日历联动等）由 Playwright E2E 覆盖；`router/index.ts`（路由表装配）排除。
 
 ## 7. 预留/未闭环项
 

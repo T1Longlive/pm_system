@@ -39,9 +39,9 @@ export default defineConfig({
       ],
       exclude: ['src/router/index.ts', 'src/**/*.spec.ts', 'src/test/**'],
       thresholds: {
-        lines: 55,
+        lines: 90,
         functions: 80,
-        statements: 55,
+        statements: 90,
         branches: 90
       }
     }

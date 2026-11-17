@@ -35,8 +35,10 @@ test('需求：列表可见造数需求，点击进入详情并展示进度节�
   await loginViaUi(page, ADMIN_USERNAME, ADMIN_PASSWORD)
   await page.goto('/requirements')
 
-  await expect(page.getByText(data.requirementTitle)).toBeVisible()
-  await page.getByRole('button', { name: data.requirementTitle }).click()
+  // 造数里还有一个「原标题-待加入」的需求，必须用精确匹配避免 strict mode 命中两个
+  const titleButton = page.getByRole('button', { name: data.requirementTitle, exact: true })
+  await expect(titleButton).toBeVisible()
+  await titleButton.click()
 
   await expect(page).toHaveURL(new RegExp(`/requirements/${data.requirementId}`))
   await expect(page.getByText(data.requirementTitle).first()).toBeVisible()

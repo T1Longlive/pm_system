@@ -30,6 +30,9 @@ export interface SeededFlow {
   projectName: string
   requirementId: number
   requirementTitle: string
+  /** 第二个需求：只建不进月表，供「从需求池添加」弹窗使用 */
+  pickableRequirementId: number
+  pickableRequirementTitle: string
   memberId: number
   memberUsername: string
   memberRealName: string
@@ -70,6 +73,8 @@ export const apiGet = <T>(request: APIRequestContext, path: string, token: strin
   apiCall<T>(request, 'get', path, token)
 export const apiPost = <T>(request: APIRequestContext, path: string, token: string, data?: unknown) =>
   apiCall<T>(request, 'post', path, token, data)
+export const apiPut = <T>(request: APIRequestContext, path: string, token: string, data?: unknown) =>
+  apiCall<T>(request, 'put', path, token, data)
 
 function randomLetters(length: number): string {
   return Array.from({ length }, () =>
@@ -123,6 +128,16 @@ export async function seedCoreFlow(request: APIRequestContext): Promise<SeededFl
     ]
   })
 
+  // 第二个需求不加入月表：用于验证「从需求池添加」
+  const pickableRequirementTitle = `${requirementTitle}-待加入`
+  const pickableRequirementId = await apiPost<number>(request, '/api/requirements', admin.token, {
+    projectId: project!.id,
+    title: pickableRequirementTitle,
+    priority: 2,
+    plannerId: member.id,
+    participants: [{ userId: member.id, craft: 'FE' }]
+  })
+
   const now = new Date()
   const year = now.getFullYear()
   const month = now.getMonth() + 1
@@ -151,6 +166,8 @@ export async function seedCoreFlow(request: APIRequestContext): Promise<SeededFl
     projectName,
     requirementId,
     requirementTitle,
+    pickableRequirementId,
+    pickableRequirementTitle,
     memberId: member.id,
     memberUsername,
     memberRealName,
