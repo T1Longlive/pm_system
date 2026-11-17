@@ -31,6 +31,12 @@ import {
 } from '@/constants/bug'
 import { PRIORITY_OPTIONS, priorityLabel } from '@/constants/requirement'
 import { craftLabel } from '@/constants/craft'
+import {
+  numCellUpdate,
+  statusCellUpdate,
+  textCellUpdate,
+  videoCellUpdate
+} from '@/utils/bug'
 
 const userStore = useUserStore()
 // 路由（支持 query.projectId 自动选中项目，供全局搜索等外部入口使用）
@@ -199,11 +205,11 @@ type TextCellField = 'version' | 'feature' | 'description' | 'solution' | 'devRe
 // 文本格保存：'' 清空（哨兵）→ 本地置 null，PUT 提交失败回滚
 const saveText = async (row: BugListItem, field: TextCellField, value: string) => {
   const snapshot = row[field]
-  const local = value === '' ? null : value
-  if ((snapshot ?? '') === value) return
+  const { local, payload } = textCellUpdate(value)
+  if ((snapshot ?? '') === payload) return
   row[field] = local
   try {
-    await updateBug(row.id, { [field]: value } as UpdateBugParams)
+    await updateBug(row.id, { [field]: payload } as UpdateBugParams)
   } catch {
     row[field] = snapshot
   }
@@ -216,11 +222,11 @@ type StatusField = 'handleStatus' | 'acceptStatus'
 // 数值/ID 下拉保存：清空传 0（哨兵）→ 本地置 null
 const saveSelectNum = async (row: BugListItem, field: NumField, value: number | '' | undefined) => {
   const snapshot = row[field]
-  const local = value == null || value === '' ? null : value
+  const { local, payload } = numCellUpdate(value)
   if (snapshot === local) return
   ;(row as unknown as Record<NumField, number | null>)[field] = local
   try {
-    await updateBug(row.id, { [field]: local === null ? 0 : local } as UpdateBugParams)
+    await updateBug(row.id, { [field]: payload } as UpdateBugParams)
   } catch {
     ;(row as unknown as Record<NumField, number | null>)[field] = snapshot as number | null
   }
@@ -229,11 +235,11 @@ const saveSelectNum = async (row: BugListItem, field: NumField, value: number | 
 // 状态下拉保存：清空传 ''（哨兵）→ 本地置 null
 const saveSelectStatus = async (row: BugListItem, field: StatusField, value: string | '' | undefined) => {
   const snapshot = row[field]
-  const local = value ? value : null
+  const { local, payload } = statusCellUpdate(value)
   if (snapshot === local) return
   ;(row as unknown as Record<StatusField, string | null>)[field] = local
   try {
-    await updateBug(row.id, { [field]: local ?? '' } as UpdateBugParams)
+    await updateBug(row.id, { [field]: payload } as UpdateBugParams)
   } catch {
     ;(row as unknown as Record<StatusField, string | null>)[field] = snapshot as string | null
   }
@@ -467,18 +473,6 @@ const handleVideoUploadRequest = async (options: UploadRequestOptions) => {
   }
 }
 
-// 外链 URL 的显示名兜底：取 URL 尾段
-const videoNameFromUrl = (url: string) => {
-  const tail = url.split('/').pop() || url
-  let name = tail
-  try {
-    name = decodeURIComponent(tail)
-  } catch {
-    // 保持原样
-  }
-  return name.slice(0, 200)
-}
-
 // 保存视频（上传或粘贴后点确定）：一次 PUT 两个字段
 const saveVideo = async () => {
   const row = videoTarget.value
@@ -489,10 +483,10 @@ const saveVideo = async () => {
     return
   }
   // 名称优先取本次上传的原始文件名，否则取 URL 尾段
-  const name = uploadedVideoName.value || videoNameFromUrl(url)
-  await updateBug(row.id, { videoUrl: url, videoName: name })
-  row.videoUrl = url
-  row.videoName = name
+  const payload = videoCellUpdate(url, uploadedVideoName.value)
+  await updateBug(row.id, payload)
+  row.videoUrl = payload.videoUrl
+  row.videoName = payload.videoName
   videoVisible.value = false
   ElMessage.success('视频已保存')
 }

@@ -36,10 +36,8 @@ public class RequirementCreateDTO {
     private Long plannerId;
 
     /** 参与人（userId + 工种），可空；每人必须是该项目对应工种成员 */
-    @Valid
-    private List<ParticipantDTO> participants;
+    private List<@Valid ParticipantDTO> participants;
 
     /** 附件，可空；先调 POST /api/files/upload 再回传，落 attachment 表（biz_type=REQUIREMENT） */
-    @Valid
-    private List<AttachmentDTO> attachments;
+    private List<@Valid AttachmentDTO> attachments;
 }

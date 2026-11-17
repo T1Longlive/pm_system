@@ -2,13 +2,14 @@
 
 ## 1. 后端 Maven 依赖（`backend/pom.xml`）
 
-父工程 `spring-boot-starter-parent` **3.2.5** 统管版本；`java.version=17`。
+父工程 `spring-boot-starter-parent` **4.1.1** 统管版本；`java.version=17`（Spring Framework 7 / Jackson 3 基线）。
 
 | 依赖 | 版本 | 作用域 | 用途 |
 |------|------|--------|------|
 | spring-boot-starter-web | BOM | compile | Web MVC + REST |
 | spring-boot-starter-validation | BOM | compile | `@Valid` / `@NotBlank` 参数校验 |
-| mybatis-plus-spring-boot3-starter | 3.5.5 | compile | ORM：BaseMapper、条件构造器、分页插件（Spring Boot 3 专用 starter） |
+| mybatis-plus-spring-boot4-starter | 3.5.17 | compile | ORM：BaseMapper、条件构造器、分页插件（Spring Boot 4 专用 starter） |
+| mybatis-plus-jsqlparser | 3.5.17 | compile | 分页插件依赖（3.5.9 起从核心包拆出） |
 | mysql-connector-j | BOM | runtime | MySQL 驱动 |
 | spring-boot-starter-data-redis | BOM | compile | 需求/Bug 编号流水号（`StringRedisTemplate`） |
 | spring-security-crypto | BOM | compile | **仅 BCrypt** 密码哈希（刻意未引入完整 Spring Security） |
@@ -16,7 +17,9 @@
 | jjwt-impl | 0.11.5 | runtime | JWT 实现 |
 | jjwt-jackson | 0.11.5 | runtime | JWT JSON 序列化 |
 | lombok | BOM | optional | 编译期简化 POJO |
-| spring-boot-starter-test | BOM | test | 测试（仅一个上下文加载冒烟测试） |
+| spring-boot-starter-test | BOM | test | JUnit 6 / Mockito 5 / AssertJ 3 |
+| testcontainers（core + mysql） | 2.0.5 | test | 集成测试真实 MySQL 8 / Redis 7 容器 |
+| archunit | 1.4.1 | test | 分层依赖架构守护 |
 
 **构建插件**：`spring-boot-maven-plugin`（打包时排除 Lombok）。
 
@@ -60,7 +63,7 @@ name `pm-system-frontend`，private，`type: "module"`。scripts：`dev`（vite�
 | vxe-table + vxe-pc-ui | ^4.21.5 / ^4.17.28 | 高性能表格（**排期页 Schedule.vue 与 Bug 页 Bugs.vue 局部引入**） |
 | **echarts** | **^6.1.0** | **看板/报表图表（2026-09 新增，Dashboard.vue / Reports.vue 使用）** |
 
-**devDependencies**：vite ^5.4.21、@vitejs/plugin-vue ^5.2.4、typescript ~5.9.3、vue-tsc ^3.3.11、@types/node ^26.4.1。未配置 ESLint/Prettier/测试框架。
+**devDependencies**：vite ^5.4.21、@vitejs/plugin-vue ^5.2.4、typescript ~5.9.3、vue-tsc ^3.3.11、@types/node ^26.4.1；测试相关：vitest ^2.1.9、@vitest/coverage-v8、@vue/test-utils ^2、jsdom ^25、@playwright/test ^1。未配置 ESLint/Prettier。
 
 **前端内部依赖方向**：
 
@@ -101,7 +104,21 @@ constants/* ──► 被 views/components 引用（状态/工种/Bug 进度文�
 | Node.js + npm | 18+ | 前端开发/构建 |
 | 本地磁盘 | `D:/pm-upload`（`pm.upload-dir`） | 附件存储（目录自动创建） |
 
-## 6. 预留/未闭环项
+## 6. 测试体系
+
+| 层 | 命令 | 说明 |
+|------|------|------|
+| 后端单元 + 架构 | `mvn test` | 不依赖外部资源；镜像构建执行这一层 |
+| 后端集成 | `mvn verify` | Failsafe 执行 `*IT`，Testcontainers 启动 MySQL 8 / Redis 7；JaCoCo `check` 覆盖率门禁 |
+| 前端单元 | `npm run test:unit:ci` | Vitest + Vue Test Utils + v8 覆盖率 |
+| 前端 E2E | `E2E_BASE_URL=... npm run test:e2e` | Playwright；未设置 `E2E_BASE_URL` 时用例自动跳过 |
+| CI | `.github/workflows/test.yml` | PR / main 触发：后端 `verify` + 前端单测与构建 |
+
+测试支撑：`AbstractIntegrationTest`（容器生命周期）、`Fixtures` / `TestDates`（造数）、`TestClock`（可拨动时间）、`MybatisPlusTestSupport`（纯单测的 Lambda 缓存初始化）。
+
+覆盖率门禁：整体行覆盖 ≥55%；`RequirementStageServiceImpl` ≥80%、`ScheduleServiceImpl` ≥65%、`BugServiceImpl` ≥85%、`ProjectServiceImpl` ≥85%、`OperationLogServiceImpl` ≥75%、`NotificationServiceImpl` ≥90%、`FileServiceImpl` / `JwtInterceptor` ≥90%。
+
+## 7. 预留/未闭环项
 
 - **Bug 通知仍缺产生方**：`NotifyTypes` 中 `BUG_*` 三类型无调用点——Bug 有意不发通知（高频编辑噪声）。但 Bug **操作日志已闭环**（CREATE/UPDATE/ARCHIVE/RESTORE/DELETE/ADD_IMAGE/DELETE_IMAGE 全部落 `biz_operation_log`，`biz_type=BUG`）。
 - `attachment.biz_type='BUG'` 已投入使用（问题截图/视频）；`notification` 表的 BUG 多态仍未使用。

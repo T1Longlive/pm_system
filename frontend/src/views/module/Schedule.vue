@@ -24,6 +24,17 @@ import {
 import type { CalendarDayData, CalendarDayType } from '@/api/calendar'
 import { craftLabel } from '@/constants/craft'
 import { priorityLabel, priorityTagType } from '@/constants/requirement'
+import {
+  buildFilterOptions,
+  buildMergeCells,
+  buildRowCells,
+  computeScheduledSum,
+  deriveRowStatus,
+  filterScheduleRows,
+  isConflictError,
+  localCellSum,
+  type ScheduleFilterField as FilterField
+} from '@/utils/schedule'
 import ScheduleRequirementPicker from '@/components/ScheduleRequirementPicker.vue'
 import ScheduleFilterHeader from '@/components/ScheduleFilterHeader.vue'
 
@@ -97,10 +108,7 @@ const flatRows = computed<FlatRow[]>(() => {
 const GROUP_COL_INDEXES = [0, 1, 2, 3, 4]
 
 // ===== 列筛选（表头右下角三角按钮，勾选面板：去重合并统计 + 全选/反选/清除/确定） =====
-type FilterField = 'title' | 'projectName' | 'plannerName' | 'priority' | 'realName'
-const FILTER_FIELDS: FilterField[] = ['title', 'projectName', 'plannerName', 'priority', 'realName']
-
-// 各字段筛选状态：null=未筛选；否则为勾选的归一化值集合
+// 筛选状态：null=未筛选；否则为勾选的归一化值集合
 const colFilters = reactive<Record<FilterField, string[] | null>>({
   title: null,
   projectName: null,
@@ -109,66 +117,14 @@ const colFilters = reactive<Record<FilterField, string[] | null>>({
   realName: null
 })
 
-// 行字段取值归一化（优先级转字符串，行级负责人取自排期行，空值统一 ''）
-const filterKeyOf = (fr: FlatRow, field: FilterField): string => {
-  switch (field) {
-    case 'priority':
-      return String(fr.priority ?? '')
-    case 'realName':
-      return fr.row.realName ?? ''
-    default:
-      return (fr[field] ?? '') as string
-  }
-}
-
 // 按当前筛选状态过滤后的表格行（负责人为行级条件，其余为需求级条件）
-const filteredFlatRows = computed<FlatRow[]>(() => {
-  let rows = flatRows.value
-  for (const field of FILTER_FIELDS) {
-    const vals = colFilters[field]
-    if (!vals || vals.length === 0) continue
-    const set = new Set(vals)
-    rows = rows.filter((fr) => set.has(filterKeyOf(fr, field)))
-  }
-  return rows
-})
+const filteredFlatRows = computed<FlatRow[]>(() =>
+  filterScheduleRows(flatRows.value, colFilters)
+)
 
 // 筛选面板候选项：从当前月全部行（未筛选）去重合并统计
-const colFilterOptions = (field: FilterField): { value: string; label: string; count: number }[] => {
-  const counter = new Map<string, number>()
-  if (field === 'realName') {
-    // 行级列（负责人）不合并：按行计数
-    for (const fr of flatRows.value) {
-      const v = filterKeyOf(fr, field)
-      counter.set(v, (counter.get(v) || 0) + 1)
-    }
-  } else {
-    // 需求级列在表中多行合并为一格：按需求去重计数（同一需求的合并单元格只算一次）
-    const countedByReq = new Map<number, Set<string>>()
-    for (const fr of flatRows.value) {
-      const v = filterKeyOf(fr, field)
-      let seen = countedByReq.get(fr.requirementId)
-      if (!seen) {
-        seen = new Set()
-        countedByReq.set(fr.requirementId, seen)
-      }
-      if (!seen.has(v)) {
-        seen.add(v)
-        counter.set(v, (counter.get(v) || 0) + 1)
-      }
-    }
-  }
-  const labelOf = (v: string) => {
-    if (v === '') return '（空）'
-    if (field === 'priority') return priorityLabel(Number(v) as 1 | 2 | 3)
-    return v
-  }
-  const opts = [...counter.entries()].map(([value, count]) => ({ value, label: labelOf(value), count }))
-  if (field === 'priority') {
-    opts.sort((a, b) => Number(a.value) - Number(b.value))
-  }
-  return opts
-}
+const colFilterOptions = (field: FilterField) =>
+  buildFilterOptions(flatRows.value, field)
 
 // 筛选面板单例状态：vxe 固定列复制渲染表头，:visible 共享会双开面板，
 // 故面板用 Teleport 单例 + 按触发按钮位置定位；checked 为打开时的初始勾选
@@ -252,26 +208,9 @@ const handleDocClickForFilter = (e: MouseEvent) => {
 }
 
 // 合并单元格配置：筛选后同需求幸存行仍连续，按连续段计算需求级列纵向合并
-const mergeCells = computed<VxeTablePropTypes.MergeCells>(() => {
-  const result: VxeTablePropTypes.MergeCells = []
-  const rows = filteredFlatRows.value
-  let index = 0
-  let i = 0
-  while (i < rows.length) {
-    const rid = rows[i].requirementId
-    let j = i
-    while (j < rows.length && rows[j].requirementId === rid) j++
-    const span = j - i
-    if (span > 1) {
-      for (const col of GROUP_COL_INDEXES) {
-        result.push({ row: index, col, rowspan: span, colspan: 1 })
-      }
-    }
-    index += span
-    i = j
-  }
-  return result
-})
+const mergeCells = computed<VxeTablePropTypes.MergeCells>(() =>
+  buildMergeCells(filteredFlatRows.value, GROUP_COL_INDEXES)
+)
 
 // 数据（含筛选结果）变化后重应用合并：先清旧合并再按新行集设置，避免残留跨行错误指向
 watch(filteredFlatRows, async () => {
@@ -302,6 +241,41 @@ const weekdayLabel = (day: string) => {
 // 日号（1~31）
 const dayNumber = (day: string) => Number(day.slice(8, 10))
 
+// ISO 周序号（周一为一周起点，周四定位所属年份）：跨月连续、跨年稳定，用作每周配色的分组键
+const isoWeekKey = (day: string): number => {
+  const [y, m, d] = day.split('-').map(Number)
+  const date = new Date(y, m - 1, d)
+  const shift = (date.getDay() + 6) % 7 // 周一=0 … 周日=6
+  date.setDate(date.getDate() - shift + 3) // 落到本周周四，确定 ISO 年归属
+  const firstThursday = new Date(date.getFullYear(), 0, 4)
+  firstThursday.setDate(firstThursday.getDate() - ((firstThursday.getDay() + 6) % 7) + 3)
+  return Math.round((date.getTime() - firstThursday.getTime()) / 604800000) + 1
+}
+
+// 每周底色色板：6 色循环，保证相邻周一定不同色
+const WEEK_COLOR_COUNT = 6
+const weekColorIndex = (day: string) => {
+  const k = isoWeekKey(day) % WEEK_COLOR_COUNT
+  return k < 0 ? k + WEEK_COLOR_COUNT : k
+}
+
+// 当月自然周分组（含起止日）：图例按周展示对应底色
+const monthWeeks = computed<{ week: number; index: number; start: string; end: string }[]>(() => {
+  const map = new Map<number, { start: string; end: string }>()
+  for (const d of view.value?.days || []) {
+    const key = isoWeekKey(d.day)
+    const cur = map.get(key)
+    if (cur) cur.end = d.day
+    else map.set(key, { start: d.day, end: d.day })
+  }
+  return [...map.entries()].map(([week, r]) => ({
+    week,
+    index: (week % WEEK_COLOR_COUNT + WEEK_COLOR_COUNT) % WEEK_COLOR_COUNT,
+    start: r.start,
+    end: r.end
+  }))
+})
+
 // 日类型中文名（表头悬停提示用）
 const DAY_TYPE_LABELS: Record<CalendarDayType, string> = {
   WORKDAY: '工作日',
@@ -320,14 +294,15 @@ const rowClassName: VxeTablePropTypes.RowClassName<FlatRow> = ({ row }) => {
   return ''
 }
 
-// 单元格样式：日期列有值浅蓝底、非可排班日斜纹灰
+// 单元格样式：已排期格子按自然周交替底色；非可排班日斜纹灰
 const cellClassName: VxeTablePropTypes.CellClassName<FlatRow> = ({ row, column }) => {
   const day = column?.field || ''
   const dayInfo = dayMap.value[day]
   if (!dayInfo) return ''
   if (!isSchedulable(dayInfo)) return 'cell-day cell-locked'
   const v = row.row.cells[day]
-  return v != null && v > 0 ? 'cell-day cell-filled' : 'cell-day'
+  if (v != null && v > 0) return `cell-day cell-filled wk${weekColorIndex(day)}`
+  return 'cell-day'
 }
 
 // 表头单元格样式：非可排班日列头灰显
@@ -419,22 +394,8 @@ const findRow = (rowId: number): ScheduleRowData | null => {
 }
 
 // 组装整行 cells（仅保留 >0 的日期，PUT 整行替换）
-const buildCells = (row: ScheduleRowData): Record<string, number> => {
-  const cells: Record<string, number> = {}
-  for (const d of view.value?.days || []) {
-    const v = row.cells[d.day]
-    if (v != null && v > 0) cells[d.day] = v
-  }
-  return cells
-}
-
-// 是否乐观锁冲突（HTTP 409 / body code=409 / 拦截器转译的冲突文案）
-const isConflict = (error: unknown): boolean => {
-  if (typeof error !== 'object' || error === null) return false
-  const e = error as { response?: { status?: number; data?: { code?: number } }; message?: string }
-  if (e.response?.status === 409 || e.response?.data?.code === 409) return true
-  return !!e.message && e.message.includes('已被')
-}
+const buildCells = (row: ScheduleRowData): Record<string, number> =>
+  buildRowCells(row.cells, (view.value?.days || []).map((d) => d.day))
 
 // 请求保存该行：在途时仅标脏，由在途流程结束后补存
 const requestSave = (rowId: number) => {
@@ -469,7 +430,7 @@ const flushRow = async (rowId: number) => {
           void fetchMonths()
         }
       } catch (error) {
-        if (isConflict(error)) {
+        if (isConflictError(error)) {
           // 乐观锁冲突：后端 message 已由拦截器弹出，整表刷新恢复最新数据
           dirtyRows.delete(rowId)
           void fetchView()
@@ -498,30 +459,19 @@ const handleEffortChange = (row: FlatRow) => {
 // 已排合计（跨全部月份）：后端组内合计 - 加载时本行格子合计 + 本地当前格子合计
 // （本地编辑格子时实时反映：保存前本地即为最新，保存成功后本地值即已持久化）
 const rowSumAtLoad = ref<Record<number, number>>({})
-const localCellSum = (cells: Record<string, number>): number => {
-  let sum = 0
-  for (const v of Object.values(cells)) sum += v || 0
-  return Math.round(sum * 10) / 10
-}
-const scheduledSum = (row: ScheduleRowData): number => {
-  const loaded = rowSumAtLoad.value[row.rowId]
-  if (loaded === undefined) return localCellSum(row.cells)
-  return Math.round((row.scheduledSum - loaded + localCellSum(row.cells)) * 10) / 10
-}
+const scheduledSum = (row: ScheduleRowData): number =>
+  computeScheduledSum(row.scheduledSum, rowSumAtLoad.value[row.rowId], row.cells)
 
 // ===== 行状态（三态派生）与整个需求添加到下月 =====
 // 行状态展示：VOID 已作废；需求已归档 → 已归档（排期只读）；未设工期 → 待排期（灰）；
 // 跨月已排合计 < 工期 → 排期中（橙）；跨月已排合计 ≥ 工期 → 已排期（绿）
-const rowStatusInfo = (
-  row: FlatRow
-): { label: string; type: 'primary' | 'success' | 'info' | 'warning' } => {
-  if (row.row.status === 'VOID') return { label: '已作废', type: 'info' }
-  if (row.reqStatus === 'ARCHIVED') return { label: '已归档', type: 'info' }
-  if (!row.row.plannedEffort || row.row.plannedEffort <= 0) return { label: '待排期', type: 'info' }
-  const sum = scheduledSum(row.row)
-  if (sum >= row.row.plannedEffort) return { label: '已排期', type: 'success' }
-  return { label: '排期中', type: 'warning' }
-}
+const rowStatusInfo = (row: FlatRow) =>
+  deriveRowStatus({
+    rowStatus: row.row.status,
+    reqStatus: row.reqStatus,
+    plannedEffort: row.row.plannedEffort,
+    scheduledSum: scheduledSum(row.row)
+  })
 
 // 整个需求添加到下月/删除按钮可见：非作废行 + 本人是该项目 PM + 需求未归档（已归档排期只读）
 const canCopy = (row: FlatRow) =>
@@ -792,11 +742,26 @@ const goCalendar = () => {
   router.push('/admin/calendar')
 }
 
+// ===== 表格可视高度 =====
+// 表格按「内容高度」渲染，最多长到可视区（max-height）：
+// 内容少 → 表格紧贴内容，四周黑框闭合，下方不留白；内容多 → 达到上限后内部滚动（表头仍固定）。
+// 🔴 不能再用 height="auto"（撑满容器）：那样内容下方会空出一大块，边框线永远够不到表格底边。
+const matrixWrapRef = ref<HTMLElement | null>(null)
+const tableMaxHeight = ref(0)
+let wrapResizeObserver: ResizeObserver | null = null
+
 // 页面挂载：并行加载项目与月表列表，随后加载视图；注册 F5/关标签页兜底拦截
 onMounted(async () => {
   window.addEventListener('beforeunload', handleBeforeUnload)
   // 列筛选面板：点击外部关闭（capture 阶段，先于触发按钮的 @click.stop 生效）
   window.addEventListener('click', handleDocClickForFilter, true)
+  // 可视区高度测量：窗口/侧栏变化时同步给表格的 max-height
+  if (matrixWrapRef.value) {
+    wrapResizeObserver = new ResizeObserver(() => {
+      tableMaxHeight.value = matrixWrapRef.value?.clientHeight || 0
+    })
+    wrapResizeObserver.observe(matrixWrapRef.value)
+  }
   refreshIncompleteCache()
   fetchProjects()
   await fetchMonths()
@@ -807,6 +772,8 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('click', handleDocClickForFilter, true)
+  wrapResizeObserver?.disconnect()
+  wrapResizeObserver = null
 })
 </script>
 
@@ -843,7 +810,7 @@ onUnmounted(() => {
 
     <!-- 排期矩阵 -->
     <el-card shadow="never" class="table-card">
-      <div v-loading="viewLoading" class="matrix-wrap">
+      <div v-loading="viewLoading" class="matrix-wrap" ref="matrixWrapRef">
         <!-- 尚无任何月表：引导生成首月 -->
         <el-empty v-if="!months.length">
           <template #description>
@@ -857,6 +824,9 @@ onUnmounted(() => {
         <template v-else>
           <!-- 注：不加表格级 :key——vxe-table 整表重挂载时 staticColumns 对动态 v-for 列收集顺序错乱（日期列交错）；
                合并丢失问题改由 ref.loadMergeCells() 在数据加载后主动应用（见 fetchView） -->
+          <!-- 注：滚动两个方向都开 enabled:true，否则超出可视区的行/列连同最外圈黑框一起被裁掉、永远看不到。
+               🔴 gt 必须显式给 -1：vxe 判定虚拟滚动的条件是 enabled && gt > -1，gt:0 = "总是虚拟滚动"，
+                  只渲染可视行会打乱 merge-cells 的合并计算。-1 = 全量渲染 DOM，仅给容器加原生滚动条。 -->
           <vxe-table
             ref="tableRef"
             :data="filteredFlatRows"
@@ -866,10 +836,10 @@ onUnmounted(() => {
             :cell-class-name="cellClassName"
             :header-cell-class-name="headerCellClassName"
             :column-config="{ resizable: true }"
-            :scroll-x="{ enabled: false }"
-            :scroll-y="{ enabled: false, gt: 0 }"
+            :scroll-x="{ enabled: true, gt: -1 }"
+            :scroll-y="{ enabled: true, gt: -1 }"
             :show-header-overflow="'title'"
-            height="auto"
+            :max-height="tableMaxHeight || undefined"
             border
             size="small"
             class="matrix-table"
@@ -1048,13 +1018,24 @@ onUnmounted(() => {
               <el-empty description="从需求池添加需求开始排期" :image-size="80" />
             </template>
           </vxe-table>
-          <!-- 图例说明 -->
-          <div class="matrix-legend">
-            <span class="legend-item legend-tip">格子点击填写：0.1 步进，单格 0~1；失焦或回车自动保存（已排格子以深蓝粗体数字显示）</span>
-            <span class="legend-item"><i class="legend-swatch locked" />周末 / 节假日（不可排）</span>
-            <span class="legend-item"><i class="legend-swatch adjusted" />调休上班</span>
-          </div>
         </template>
+      </div>
+      <!-- 图例：必须放在 matrix-wrap 之外——matrix-wrap 的高度就是表格的 max-height，
+           图例若留在里面会挤掉表格可用高度，也会让"表格底边"计算不准 -->
+      <div v-if="months.length" class="matrix-legend">
+        <span class="legend-item legend-tip">格子点击填写：0.1 步进，单格 0~1；失焦或回车自动保存（已排格子按周交替底色 + 深蓝粗体数字）</span>
+        <span class="legend-item"><i class="legend-swatch locked" />周末 / 节假日（不可排）</span>
+        <span class="legend-item"><i class="legend-swatch adjusted" />调休上班</span>
+      </div>
+      <!-- 每周底色图例：当月每个自然周一段，已排期格子底色与之对应 -->
+      <div v-if="months.length && monthWeeks.length" class="week-legend">
+        <span class="week-legend-label">已排期格子底色（按周区分）：</span>
+        <span v-for="w in monthWeeks" :key="w.week" class="week-legend-item">
+          <i class="legend-swatch" :class="`wk${w.index}`" />
+          {{ Number(w.start.slice(5, 7)) }}/{{ Number(w.start.slice(8, 10)) }}–{{
+            Number(w.end.slice(5, 7))
+          }}/{{ Number(w.end.slice(8, 10)) }}
+        </span>
       </div>
     </el-card>
 
@@ -1110,6 +1091,13 @@ onUnmounted(() => {
 <style scoped>
 /* 页面：纵向排布工具栏与矩阵卡片，整体占满可视高度（外层不出滚动条） */
 .schedule-page {
+  /* 每周底色：6 色循环，均为浅色底以保证深蓝粗体数字可读 */
+  --wk0: #d6e9ff; /* 浅蓝 */
+  --wk1: #dbf2d9; /* 浅绿 */
+  --wk2: #ffe6c4; /* 浅橙 */
+  --wk3: #e6dcfa; /* 浅紫 */
+  --wk4: #ffd9e0; /* 浅粉 */
+  --wk5: #d0eeee; /* 浅青 */
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -1167,10 +1155,10 @@ onUnmounted(() => {
   flex-direction: column;
 }
 
-/* 表格占满容器剩余空间（图例在下方自动占位） */
+/* 表格按内容高度渲染，不拉伸（上限由 :max-height 控制，见 matrix-wrap 的高度测量）。
+   🔴 不要改回 flex:1：那会让表格撑满容器，内容不满时下方空出一大块，黑框底边远离内容。 */
 .matrix-wrap :deep(.matrix-table) {
-  flex: 1;
-  min-height: 0;
+  flex: 0 0 auto;
 }
 
 /* 首月引导文案 */
@@ -1374,10 +1362,51 @@ onUnmounted(() => {
   border: 1px solid #3f9a2d;
 }
 
+/* 每周底色图例：位于图例下方单独一行，色块与格子底色同源 */
+.week-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding-top: 8px;
+  font-size: 12px;
+  color: #606266;
+}
+
+.week-legend-label {
+  color: #909399;
+}
+
+.week-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-family: Consolas, Monaco, 'Courier New', monospace;
+}
+
+/* 图例周色块：复用格子底色变量（顺序必须与格子一致） */
+.legend-swatch.wk0 { background: var(--wk0); border: 1px solid #9ec5f0; }
+.legend-swatch.wk1 { background: var(--wk1); border: 1px solid #a3d69c; }
+.legend-swatch.wk2 { background: var(--wk2); border: 1px solid #e6b877; }
+.legend-swatch.wk3 { background: var(--wk3); border: 1px solid #bca9e8; }
+.legend-swatch.wk4 { background: var(--wk4); border: 1px solid #eb9aab; }
+.legend-swatch.wk5 { background: var(--wk5); border: 1px solid #8fc9c9; }
+
 /* ===== vxe-table 内部样式覆盖（scoped 需 :deep） ===== */
-/* 全表格：黑色实线边框（每个单元格 + 表头），边框独立避免塌陷 */
-:deep(.matrix-table) .vxe-table--header-wrapper .vxe-header--column,
-:deep(.matrix-table) .vxe-table--body-wrapper .vxe-body--column {
+/* 表格外框线：vxe 会额外画一条 .vxe-table--border-line（absolute 铺满整个表格容器，z-index:10）。
+   🔴 它框的是「容器」而不是「内容」：表格 height="auto" 撑满 flex 容器时，行内容高度常小于容器高度，
+   这条线就悬在内容下方几条像素处，看着像多出来的一条线（先前的"白线"就是它，默认色 #e8eaec）。
+   → 直接去掉：表格轮廓由每个单元格自己的 1px 边框围成，位置必然与内容一致。 */
+:deep(.matrix-table) .vxe-table--border-line {
+  display: none;
+}
+
+/* 全表格：黑色实线边框（每个单元格 + 表头），边框独立避免塌陷。
+   🔴 不写 .vxe-table--body-wrapper 这一层限定：固定列的单元格会被复制一份到
+      .vxe-table--fixed-left/right-wrapper（绝对定位覆盖在上层，自带不透明背景），
+      只给 body-wrapper 加边框的话，固定列这一份就没有边框、还会遮住底下那条 → 左右两侧看不到边线。 */
+:deep(.matrix-table) .vxe-header--column,
+:deep(.matrix-table) .vxe-body--column {
   border: 1px solid #303133;
 }
 
@@ -1386,11 +1415,19 @@ onUnmounted(() => {
   border-bottom: 1px solid #303133;
 }
 
-/* 有值格子：不加背景色，仅深蓝粗体数字标识 */
+/* 有值格子：深蓝粗体数字 + 所属自然周的浅底色
+   （!important 压过 vxe 默认单元格底色；色板定义在 .schedule-page 的 --wk0~--wk5） */
 :deep(td.cell-filled) {
   font-weight: 700;
   color: #1b4f8a;
 }
+
+:deep(td.cell-filled.wk0) { background-color: var(--wk0) !important; }
+:deep(td.cell-filled.wk1) { background-color: var(--wk1) !important; }
+:deep(td.cell-filled.wk2) { background-color: var(--wk2) !important; }
+:deep(td.cell-filled.wk3) { background-color: var(--wk3) !important; }
+:deep(td.cell-filled.wk4) { background-color: var(--wk4) !important; }
+:deep(td.cell-filled.wk5) { background-color: var(--wk5) !important; }
 
 /* 非可排班日格子：斜纹底加深（底色与条纹再加深一档，与可排班白格明显区分；!important 压过 vxe 默认 background-image） */
 :deep(td.vxe-body--column.cell-locked) {

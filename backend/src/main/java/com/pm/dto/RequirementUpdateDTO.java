@@ -32,12 +32,10 @@ public class RequirementUpdateDTO {
     private Long plannerId;
 
     /** 参与人全量提交：null 不修改，非 null 与库中记录做增删 diff */
-    @Valid
-    private List<ParticipantDTO> participants;
+    private List<@Valid ParticipantDTO> participants;
 
     /** 附件全量提交：null 不修改，非 null 全量替换（简单可靠） */
-    @Valid
-    private List<AttachmentDTO> attachments;
+    private List<@Valid AttachmentDTO> attachments;
 
     /** 乐观锁版本：页面加载时的 updated_at（毫秒时间戳），必填；与库中不一致返回 409 */
     @NotNull(message = "updatedAt不能为空")

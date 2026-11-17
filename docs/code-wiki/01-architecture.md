@@ -163,8 +163,8 @@ PM 或管理员归档 → 进归档表（只读，可删除）；重新打开 �
 
 | 组件 | 用途 |
 |------|------|
-| Spring Boot 3.2.5 | Web MVC、事务、`@EnableScheduling`、参数校验 |
-| MyBatis-Plus 3.5.5 | 单表 CRUD、LambdaQueryWrapper、分页插件（MySQL 方言） |
+| Spring Boot 4.1.1 | Web MVC、事务、`@EnableScheduling`、参数校验（Spring Framework 7 / Jackson 3 基线） |
+| MyBatis-Plus 3.5.17 | 单表 CRUD、LambdaQueryWrapper、分页插件（MySQL 方言；Boot 4 专用 starter） |
 | MySQL 8.x | 持久化（13 张表，无物理外键，靠唯一键+索引关联） |
 | Redis | 需求/Bug 编号流水号 |
 | jjwt 0.11.5 | HS256 无状态 JWT，有效期 7200 分钟（5 天） |

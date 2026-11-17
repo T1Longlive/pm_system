@@ -16,6 +16,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.YearMonth;
@@ -52,6 +53,9 @@ public class CalendarServiceImpl implements CalendarService, ApplicationRunner {
     private static final Set<String> ALL_TYPES = Set.of(TYPE_WORKDAY, TYPE_WEEKEND, TYPE_HOLIDAY, TYPE_ADJUSTED);
 
     private final CalendarDayMapper calendarDayMapper;
+
+    /** 时间来源：预生成日历的「今天」由它决定，测试可注入固定/可拨动 Clock */
+    private final Clock clock;
 
     @Override
     public CalendarMonthVO getMonth(Integer year, Integer month) {
@@ -116,7 +120,7 @@ public class CalendarServiceImpl implements CalendarService, ApplicationRunner {
      */
     @Override
     public void run(ApplicationArguments args) {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(clock);
         LocalDate start = today.withDayOfMonth(1);
         LocalDate end = today.plusMonths(12);
         Set<LocalDate> existingDays = calendarDayMapper.selectList(

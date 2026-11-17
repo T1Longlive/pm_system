@@ -43,6 +43,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
@@ -118,6 +119,8 @@ public class ScheduleServiceImpl implements ScheduleService {
     private final NotificationService notificationService;
     private final CalendarService calendarService;
     private final RequirementStageService stageSyncService;
+    /** 时间来源：退出拦截的「今天」与乐观锁版本时间，测试可注入固定/可拨动 Clock */
+    private final Clock clock;
 
     // ==================== 月度排期表 ====================
 
@@ -548,7 +551,7 @@ public class ScheduleServiceImpl implements ScheduleService {
         }
         // 批量查询开发已开工的需求 id 集合（开发未开始可派生回退，不拦截）
         List<Long> candidateIds = reqIds.stream().filter(notFullReqIds::contains).toList();
-        Set<Long> startedDevReqIds = new HashSet<>(scheduleRowMapper.selectStartedDevReqIds(candidateIds, LocalDate.now()));
+        Set<Long> startedDevReqIds = new HashSet<>(scheduleRowMapper.selectStartedDevReqIds(candidateIds, LocalDate.now(clock)));
         List<ScheduleIncompleteVO> result = new ArrayList<>();
         for (Requirement req : reqs) {
             if (!notFullReqIds.contains(req.getId()) || !startedDevReqIds.contains(req.getId())) {
@@ -941,7 +944,7 @@ public class ScheduleServiceImpl implements ScheduleService {
      * 避免数据库秒级精度下同秒内连续编辑导致乐观锁版本不前进
      */
     private LocalDateTime nextVersionTime(LocalDateTime oldTime) {
-        LocalDateTime now = LocalDateTime.now().withNano(0);
+        LocalDateTime now = LocalDateTime.now(clock).withNano(0);
         if (oldTime != null && !now.isAfter(oldTime)) {
             return oldTime.plusSeconds(1);
         }

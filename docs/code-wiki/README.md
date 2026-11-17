@@ -1,7 +1,7 @@
 # pm-system 项目 Code Wiki
 
 > 基于 2026-09 最新代码逐一分析整理的工程知识库，面向新加入/接手本仓库的开发人员。
-> 数据来源：`backend/`（Spring Boot 3.2.5，约 117 个 Java 源文件）与 `frontend/`（Vue 3 + TypeScript，约 39 个源文件）全部源码。
+> 数据来源：`backend/`（Spring Boot 4.1.1，约 134 个 Java 源文件）与 `frontend/`（Vue 3 + TypeScript，约 40 个源文件）全部源码。
 > 本次更新（2026-09-11）：同步「需求状态派生化重构」与新增的 工作台 / 统计报表 / 全局搜索 / 操作日志 四个模块，修正此前文档的滞后描述。
 
 ---
@@ -23,8 +23,8 @@
 | 状态管理 | Pinia | 4.x（用户会话） |
 | 路由 | Vue Router 4 | history 模式 + 路由级守卫 |
 | HTTP | Axios | 统一实例 + 双拦截器 |
-| 后端 | Spring Boot | 3.2.5（Java 17） |
-| ORM | MyBatis-Plus | 3.5.5（spring-boot3-starter） |
+| 后端 | Spring Boot | 4.1.1（Java 17；Spring Framework 7 / Jackson 3） |
+| ORM | MyBatis-Plus | 3.5.17（spring-boot4-starter） |
 | 数据库 | MySQL 8.x | `pm_system` 库，13 张表 |
 | 缓存 | Redis | 需求/Bug 编号流水号生成 |
 | 认证 | JWT（jjwt 0.11.5）+ BCrypt | 自定义拦截器，未引入完整 Spring Security |

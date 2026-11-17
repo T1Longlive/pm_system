@@ -6,6 +6,7 @@ import com.pm.mapper.RequirementMapper;
 import com.pm.mapper.RequirementParticipantMapper;
 import com.pm.mapper.ScheduleRowMapper;
 import com.pm.service.NotificationService;
+import com.pm.support.TestClock;
 import com.pm.vo.RequirementGroupAggVO;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -36,12 +37,16 @@ class RequirementStageServiceImplTest {
     /** 固定"今天"，让日期驱动的窗口判定可复现 —— 不依赖运行时的当前日期 */
     private static final LocalDate TODAY = LocalDate.of(2026, 9, 15);
 
+    /** 派生结果只依赖入参 today；Clock 仅 syncStage 使用，这里固定到同一天保持一致 */
+    private final TestClock clock = TestClock.fixedAt(TODAY);
+
     private final RequirementStageServiceImpl service = new RequirementStageServiceImpl(
             mock(RequirementMapper.class),
             mock(ScheduleRowMapper.class),
             mock(RequirementParticipantMapper.class),
             mock(BizOperationLogMapper.class),
-            mock(NotificationService.class));
+            mock(NotificationService.class),
+            clock);
 
     // ==================== 构造入参的小工具 ====================
 
@@ -98,6 +103,18 @@ class RequirementStageServiceImplTest {
         void archivedIsFinal() {
             assertThat(derive("ARCHIVED", List.of(ongoingGroup("DEV")))).isEqualTo("ARCHIVED");
         }
+
+        @Test
+        @DisplayName("已归档且没有任何排期行 → 仍为 ARCHIVED（终态优先于空组判定）")
+        void archivedWithNoGroupsIsFinal() {
+            assertThat(derive("ARCHIVED", List.of())).isEqualTo("ARCHIVED");
+        }
+
+        @Test
+        @DisplayName("已取消且没有任何排期行 → 仍为 CANCELLED")
+        void cancelledWithNoGroupsIsFinal() {
+            assertThat(derive("CANCELLED", List.of())).isEqualTo("CANCELLED");
+        }
     }
 
     @Nested
@@ -146,6 +163,14 @@ class RequirementStageServiceImplTest {
         }
 
         @Test
+        @DisplayName("已排超过工期（total > plannedEffort）不算未排满，按日期窗口继续判定")
+        void overScheduledIsNotPending() {
+            // 格子合计 4 > 工期 3，窗口已过去且无 QA → ARCHIVING
+            assertThat(derive("DEV", List.of(group("DEV", "3", "4", 1, 1, TODAY.minusDays(1)))))
+                    .isEqualTo("ARCHIVING");
+        }
+
+        @Test
         @DisplayName("多个组里只要有一个没排满 → PENDING")
         void oneGroupNotFullMakesPending() {
             List<RequirementGroupAggVO> groups = List.of(
@@ -177,6 +202,16 @@ class RequirementStageServiceImplTest {
         void noCellAtAll() {
             assertThat(derive("PENDING", List.of(group("DEV", "3", "3", 1, 1, null))))
                     .isEqualTo("DEV");
+        }
+
+        @Test
+        @DisplayName("多个非 QA 组：只要还有一个窗口未结束，就仍是 DEV")
+        void multipleDevGroupsOneOngoingStillDev() {
+            List<RequirementGroupAggVO> groups = List.of(
+                    passedGroup("FE"),
+                    passedGroup("BE"),
+                    ongoingGroup("UI"));
+            assertThat(derive("TEST", groups)).isEqualTo("DEV");
         }
 
         @Test

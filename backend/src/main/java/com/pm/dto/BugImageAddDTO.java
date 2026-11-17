@@ -15,6 +15,5 @@ public class BugImageAddDTO {
 
     /** 图片列表，每项 fileType 必须为 IMAGE（Service 层校验） */
     @NotEmpty(message = "图片列表不能为空")
-    @Valid
-    private List<AttachmentDTO> images;
+    private List<@Valid AttachmentDTO> images;
 }

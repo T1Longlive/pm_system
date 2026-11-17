@@ -17,7 +17,7 @@ PM System 是一套面向 IT 团队的项目管理系统，涵盖了**需求管�
 
 ## 技术栈
 
-*   **后端**：Java 21, Spring Boot 3, MyBatis-Plus, Redis, MySQL
+*   **后端**：Java 17, Spring Boot 4.1, MyBatis-Plus 3.5, Redis, MySQL
 *   **前端**：Vue 3, Vue Router, Pinia, Axios
 *   **文档**：详细的架构与开发文档位于 `docs/code-wiki/`
 
@@ -96,6 +96,24 @@ npm run dev
 
 默认管理员账号：`admin`
 默认管理员密码：`Pm@123456`
+
+## 测试
+
+```bash
+# 后端单元测试 + 架构守护（不需要 Docker）
+cd backend && ./mvnw test
+
+# 后端集成测试（Testcontainers，需要 Docker）+ 覆盖率门禁
+cd backend && ./mvnw verify
+
+# 前端单元测试 + 覆盖率
+cd frontend && npm run test:unit:ci
+
+# 前端 E2E（需先启动系统，并显式指定地址）
+cd frontend && E2E_BASE_URL=http://localhost:8081 npm run test:e2e
+```
+
+CI 测试流水线见 `.github/workflows/test.yml`。
 
 ## 文档导航
 

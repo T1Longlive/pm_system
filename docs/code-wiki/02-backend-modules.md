@@ -58,7 +58,7 @@
 | POST | `/api/projects/{id}/members` | 该项目 PM | 添加成员（`MemberAddDTO`：userId + crafts 多选）。**增量合并**：已有工种跳过，仅插新工种行 |
 | DELETE | `/api/projects/{id}/members/{userId}?craft=` | 该项目 PM | 移除成员。带 craft 删该工种一行；不带删该用户全部工种行 |
 
-服务：`ProjectServiceImpl`。成员按工种建行，唯一键 `(project_id, user_id, craft)`。已知 TODO：移除成员不联动其未完成的排期行。
+服务：`ProjectServiceImpl`。成员按工种建行，唯一键 `(project_id, user_id, craft)`。移除成员会联动该项目全部非终态需求：删除对应参与人、把其排期行标 `VOID`（跨全部月份，保留历史）并触发状态对账，见 [06-key-classes.md](06-key-classes.md)。
 
 ## 4. 需求模块 RequirementController `/api/requirements`
 

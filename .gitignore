@@ -19,6 +19,12 @@ target/
 .workbuddy/
 .mimocode/
 
+# 测试产物
+coverage/
+playwright-report/
+test-results/
+.playwright/
+
 # 日志与本地环境
 logs/
 *.log

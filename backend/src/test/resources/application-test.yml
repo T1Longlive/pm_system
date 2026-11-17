@@ -1,0 +1,21 @@
+# 集成测试专用配置：数据源/Redis 由 AbstractIntegrationTest 的 Testcontainers 动态注入
+spring:
+  datasource:
+    hikari:
+      # 测试容器内存有限，连接池不宜大
+      maximum-pool-size: 5
+  data:
+    redis:
+      database: 0
+
+mybatis-plus:
+  configuration:
+    # 测试期间关闭 SQL 控制台打印，保持日志可读
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl
+  global-config:
+    banner: false
+
+logging:
+  level:
+    root: WARN
+    com.pm: INFO

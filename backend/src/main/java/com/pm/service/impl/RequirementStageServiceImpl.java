@@ -17,6 +17,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.Clock;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +55,8 @@ public class RequirementStageServiceImpl implements RequirementStageService {
     private final RequirementParticipantMapper participantMapper;
     private final BizOperationLogMapper operationLogMapper;
     private final NotificationService notificationService;
+    /** 时间来源：派生状态的「今天」由它决定，测试可注入固定/可拨动 Clock */
+    private final Clock clock;
 
     @Override
     public String deriveStage(Requirement req, List<RequirementGroupAggVO> groups, LocalDate today) {
@@ -95,7 +98,7 @@ public class RequirementStageServiceImpl implements RequirementStageService {
         if (REQ_ARCHIVED.equals(req.getStatus()) || REQ_CANCELLED.equals(req.getStatus())) {
             return false;
         }
-        String after = deriveStage(req, loadGroups(List.of(requirementId)), LocalDate.now());
+        String after = deriveStage(req, loadGroups(List.of(requirementId)), LocalDate.now(clock));
         return applyIfChanged(req, after, operatorId);
     }
 
@@ -111,7 +114,7 @@ public class RequirementStageServiceImpl implements RequirementStageService {
         Map<Long, List<RequirementGroupAggVO>> groupsByReq = loadGroups(
                         reqs.stream().map(Requirement::getId).toList()).stream()
                 .collect(Collectors.groupingBy(RequirementGroupAggVO::getRequirementId));
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(clock);
         int changed = 0;
         for (Requirement req : reqs) {
             String after = deriveStage(req, groupsByReq.getOrDefault(req.getId(), List.of()), today);

@@ -89,7 +89,7 @@
 |----|------|
 | `AuthServiceImpl` | `login`：查用户 →「用户名或密码错误」统一提示（防探测）→ BCrypt.matches → 停用拦截 → 签发 token 组装 LoginVO；`changePassword`：校验原密码 → BCrypt 落库 → `forceChangePwd=0` |
 | `UserServiceImpl` | 常量 `DEFAULT_PASSWORD="Pm@123456"`；`createUser`：用户名唯一校验、密码空则默认、`forceChangePwd=1`；`updateStatus`：不允许停用自己；VO 只映射白名单字段（密码绝不出参） |
-| `ProjectServiceImpl` | `pageProjects`：管理员全量 / 普通用户「成员或创建者」过滤，成员数 `COUNT(DISTINCT user_id)` 去重、buildMyRole；`createProject`（@Transactional）：code 唯一、创建者=PM 不写 member；`addMember`（@Transactional）：工种合法性 + **增量合并**（仅插新工种行）；`removeMember`：带 craft 删单工种 / 不带删全部（TODO：不联动排期行） |
+| `ProjectServiceImpl` | `pageProjects`：管理员全量 / 普通用户「成员或创建者」过滤，成员数 `COUNT(DISTINCT user_id)` 去重、buildMyRole；`createProject`（@Transactional）：code 唯一、创建者=PM 不写 member；`addMember`（@Transactional）：工种合法性 + **增量合并**（仅插新工种行）；`removeMember`：带 craft 删单工种 / 不带删全部，并调用 `RequirementService.removeParticipantByProjectMember` 联动删除需求参与人、排期行标 VOID、状态对账 |
 | `CalendarServiceImpl` | 实现 **ApplicationRunner**：启动时预生成 `[当月, 今天+12个月]` 缺失日期（周末规则，幂等）；`getMonthDays`：库中记录优先，缺失按周末推导回退（不落库），供排期校验与顺延判定；`updateDay`：类型校验，插入或更新，name=null 清空 |
 | `FileServiceImpl` | 白名单：图片 png/jpg/jpeg/gif/webp ≤10MB（IMAGE）/ 文档 pdf/doc/docx/xlsx/zip ≤50MB（DOC）；文件名剥离路径、扩展名小写、截断 100 字符；落盘 `{upload-dir}/{yyyy}/{MM}/{32位uuid}.{ext}`；返回 url=`/upload/...` |
 | `NotificationServiceImpl` | `send`：同步落库，content 超 300 字截断（`substring(0,299)+"…"`）；`unreadCount`/`markAllRead`：is_read 条件查询/更新 |
