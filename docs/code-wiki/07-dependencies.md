@@ -111,12 +111,14 @@ constants/* ──► 被 views/components 引用（状态/工种/Bug 进度文�
 | 后端单元 + 架构 | `mvn test` | 不依赖外部资源；镜像构建执行这一层 |
 | 后端集成 | `mvn verify` | Failsafe 执行 `*IT`，Testcontainers 启动 MySQL 8 / Redis 7；JaCoCo `check` 覆盖率门禁 |
 | 前端单元 | `npm run test:unit:ci` | Vitest + Vue Test Utils + v8 覆盖率 |
-| 前端 E2E | `E2E_BASE_URL=... npm run test:e2e` | Playwright；未设置 `E2E_BASE_URL` 时用例自动跳过 |
+| 前端 E2E | `npm run test:e2e:local` | Playwright；脚本自动起 `docker-compose.e2e.yml`（MySQL/Redis）+ 后端 18080 + 前端 5173，覆盖登录/主链路/权限；连已有环境用 `E2E_BASE_URL=... npm run test:e2e`（未设置时自动跳过） |
 | CI | `.github/workflows/test.yml` | PR / main 触发：后端 `verify` + 前端单测与构建 |
 
 测试支撑：`AbstractIntegrationTest`（容器生命周期）、`Fixtures` / `TestDates`（造数）、`TestClock`（可拨动时间）、`MybatisPlusTestSupport`（纯单测的 Lambda 缓存初始化）。
 
-覆盖率门禁：整体行覆盖 ≥55%；`RequirementStageServiceImpl` ≥80%、`ScheduleServiceImpl` ≥65%、`BugServiceImpl` ≥85%、`ProjectServiceImpl` ≥85%、`OperationLogServiceImpl` ≥75%、`NotificationServiceImpl` ≥90%、`FileServiceImpl` / `JwtInterceptor` ≥90%。
+覆盖率门禁：后端整体行覆盖 ≥80%；`RequirementStageServiceImpl` ≥80%、`ScheduleServiceImpl` ≥65%、`BugServiceImpl` ≥85%、`ProjectServiceImpl` ≥85%、`OperationLogServiceImpl` ≥75%、`NotificationServiceImpl` ≥90%、`FileServiceImpl` / `JwtInterceptor` ≥90%。
+
+前端单测门禁：统计 `api` / `components` / `constants` / `router`（守卫）/ `stores` / `utils`，行与语句 ≥55%、函数 ≥80%、分支 ≥90%；`views` / `layout` 强依赖 vxe-table 与完整路由，留给 Playwright E2E，`router/index.ts`（路由表装配）排除。
 
 ## 7. 预留/未闭环项
 

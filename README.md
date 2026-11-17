@@ -109,7 +109,10 @@ cd backend && ./mvnw verify
 # 前端单元测试 + 覆盖率
 cd frontend && npm run test:unit:ci
 
-# 前端 E2E（需先启动系统，并显式指定地址）
+# 前端 E2E（一键起 MySQL/Redis + 前后端，跑完自动清理）
+cd frontend && npm run test:e2e:local
+
+# 前端 E2E（连已有环境，显式指定地址）
 cd frontend && E2E_BASE_URL=http://localhost:8081 npm run test:e2e
 ```
 

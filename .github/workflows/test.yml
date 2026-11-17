@@ -5,7 +5,8 @@ name: tests
 # ----------------------------------------------------------------------
 # 职责：只做质量门禁，不构建镜像、不部署。
 #   · backend  ：mvn verify = 单元测试 + Testcontainers 集成测试 + JaCoCo 门禁
-#   · frontend ：vue-tsc 类型检查 + vite 构建
+#   · frontend ：vue-tsc 类型检查 + vite 构建 + Vitest 单测
+#   · e2e      ：Playwright（MySQL/Redis 容器 + 后端 + 前端，跑登录/主链路/权限）
 #
 # 为什么单独一个 workflow：
 #   build-deploy 只在 push main 时跑，PR 阶段没有测试反馈；
@@ -101,4 +102,53 @@ jobs:
         with:
           name: frontend-coverage
           path: frontend/coverage
+          if-no-files-found: ignore
+
+  e2e:
+    name: 端到端（Playwright）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装前端依赖
+        working-directory: frontend
+        run: npm ci
+
+      - name: 安装 Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      # 一条命令拉起 MySQL/Redis（docker-compose.e2e.yml）+ 后端 18080 + 前端 5173，
+      # 跑完自动清理；失败时保留 Playwright 报告与 trace 供排查。
+      - name: 一键 E2E
+        working-directory: frontend
+        env:
+          E2E_VERBOSE: '1'
+        run: npm run test:e2e:local
+
+      - name: 上传 E2E 报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-e2e-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
           if-no-files-found: ignore

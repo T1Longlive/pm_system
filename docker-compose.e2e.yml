@@ -1,0 +1,38 @@
+# ======================================================================
+# E2E 专用依赖编排（只起 MySQL + Redis，不构建应用镜像）
+# ----------------------------------------------------------------------
+# 与生产 docker-compose.yml 的差异（刻意为之）：
+#   · 不挂持久卷：每次 up 都是全新数据库，E2E 数据干净可重复
+#   · 暴露非默认端口（13306 / 16379），避免与本机已占用的 3306 / 6379 冲突
+#   · 弱口令仅用于本机/CI 的临时容器，不进入任何部署链路
+#
+# 使用方式（由 e2e/run-local.mjs 自动执行，也可手工）：
+#   docker compose -f docker-compose.e2e.yml up -d --wait
+#   docker compose -f docker-compose.e2e.yml down -v
+# ======================================================================
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: pm-e2e-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: pm123456
+      MYSQL_DATABASE: pm_system
+      TZ: Asia/Shanghai
+    ports:
+      - "13306:3306"
+    volumes:
+      # 与生产同源建表：保证 E2E 校验的就是真实 schema
+      - ./backend/src/main/resources/db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ppm123456"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: pm-e2e-redis
+    command: redis-server --requirepass pm123456
+    ports:
+      - "16379:6379"

@@ -3,11 +3,12 @@ import { defineConfig, devices } from '@playwright/test'
 /**
  * Playwright 配置：E2E 需要一套已启动的系统（前端 + 后端 + MySQL/Redis）。
  *
- * 默认不指定 baseURL 时指向 http://localhost:8081（docker compose 前端端口）；
- * 运行时通过 E2E_BASE_URL 覆盖，例如：
- *   $env:E2E_BASE_URL='http://localhost:8081'; npm run test:e2e
- *
- * 为避免误连本地环境，用例内部会检查 E2E_BASE_URL，未设置时整体跳过。
+ * 两种跑法：
+ * 1. 本地一键（推荐）：`npm run test:e2e:local`
+ *    自动用 docker-compose.e2e.yml 起 MySQL/Redis，再起后端(18080)与前端(5173)，
+ *    跑完自动清理；脚本会注入 E2E_BASE_URL=http://localhost:5173。
+ * 2. 连已有环境：显式设置 E2E_BASE_URL（如 http://localhost:8081），
+ *    然后 `npx playwright test`；未设置时用例整体跳过，避免误连环境。
  */
 export default defineConfig({
   testDir: './e2e',
