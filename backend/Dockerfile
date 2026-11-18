@@ -26,6 +26,12 @@ COPY settings.xml ./settings.xml
 # 预下载全部依赖到 /root/.m2 —— 独立成层，pom 不变则永远不重复下载
 RUN mvn -s ./settings.xml -B dependency:go-offline
 
+# 契约文件：ApiContractTest 会从 user.dir 向上找 contracts/openapi.json，
+# 与 Controller 路由做双向比对。不拷进来的话测试在容器里必然抛
+# "未找到 contracts/openapi.json"（2026-11-18 构建失败的根因）。
+# 契约变动不频繁，独立成层，源码改动不会让它失效。
+COPY contracts ./contracts
+
 # 再拷源码（源码变动只让最后一层失效，依赖层仍命中缓存）
 COPY backend/src ./src
 
