@@ -24,6 +24,12 @@ RUN npm install --registry=https://registry.npmmirror.com
 # 再拷源码
 COPY frontend/ ./
 
+# 契约文件：src/api/contract.spec.ts 以 ../../../contracts/openapi.json 引用它。
+# 构建上下文里源码位于 /build/src/api/，向上三级是容器根目录 /，
+# 因此契约必须放到 /contracts/ 才能通过 vue-tsc 类型检查。
+# （本地开发时 frontend/src/api/ 向上三级正好是仓库根，两种环境路径须对齐）
+COPY contracts /contracts
+
 # vue-tsc 类型检查 + vite 构建（package.json 的 build 脚本）
 RUN npm run build
 
