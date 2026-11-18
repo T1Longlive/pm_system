@@ -100,23 +100,35 @@ npm run dev
 ## 测试
 
 ```bash
-# 后端单元测试 + 架构守护（不需要 Docker）
+# 后端单元测试 + 架构守护 + 接口契约校验（不需要 Docker）
 cd backend && ./mvnw test
 
 # 后端集成测试（Testcontainers，需要 Docker）+ 覆盖率门禁
 cd backend && ./mvnw verify
 
-# 前端单元测试 + 覆盖率
+# 前端单元测试（含 OpenAPI 契约静态校验）+ 覆盖率
 cd frontend && npm run test:unit:ci
 
-# 前端 E2E（一键起 MySQL/Redis + 前后端，跑完自动清理）
+# 前端 E2E（一键起 MySQL/Redis + 前后端，默认 Chromium，跑完自动清理）
 cd frontend && npm run test:e2e:local
+
+# 多浏览器冒烟（先安装 Firefox / WebKit，仅跑 smoke.spec.ts）
+cd frontend && npx playwright install firefox webkit && E2E_MULTI_BROWSER=1 npm run test:e2e:local
+
+# k6 性能冒烟（需先安装 k6；CI 已自动安装。也可在 E2E 环境未销毁前执行）
+cd frontend && BASE_URL=http://localhost:18080 npm run perf:smoke
 
 # 前端 E2E（连已有环境，显式指定地址）
 cd frontend && E2E_BASE_URL=http://localhost:8081 npm run test:e2e
 ```
 
-CI 测试流水线见 `.github/workflows/test.yml`。
+接口契约的唯一事实来源是 `contracts/openapi.json`：后端 `ApiContractTest` 校验 Controller
+路由与契约双向一致，前端 `contract.spec.ts` 校验 `src/api` 调用与契约一致，E2E 再校验关键
+响应的真实结构。
+
+CI 测试流水线见 `.github/workflows/test.yml`，并被 `build-deploy.yml` 复用为部署硬前置：
+测试失败则不会构建/推送镜像，也不会部署。完整的测试策略、门禁、flaky 管理与面试讲法见
+[`docs/quality.md`](docs/quality.md)。
 
 ## 文档导航
 

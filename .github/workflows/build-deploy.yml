@@ -24,6 +24,7 @@ on:
     paths:
       - 'backend/**'
       - 'frontend/**'
+      - 'contracts/**'
       - 'docker-compose.yml'
       - 'scripts/**'
       - 'settings.xml'
@@ -35,8 +36,16 @@ env:
   ACR_NAMESPACE: t1longlive
 
 jobs:
+  # 测试门禁：复用 test.yml（单元 + 切片 + 集成 + 前端单测 + E2E）。
+  # 任何一层失败都会跳过 build/deploy —— 测试不再是"旁边跑跑"，
+  # 而是部署的硬前置。同一 commit 只跑一次，避免与独立触发重复消耗。
+  tests:
+    name: 测试门禁
+    uses: ./.github/workflows/test.yml
+
   build:
     name: 构建并推送镜像
+    needs: tests
     runs-on: ubuntu-latest
     # 默认上限 360 分钟太宽松：一旦卡死（依赖源挂、镜像 pull 卡住）会空转烧掉大量额度。
     # 两个镜像冷构建实测 10~20 分钟，30 分钟足够且留了余量。

@@ -5,12 +5,16 @@ name: tests
 # ----------------------------------------------------------------------
 # 职责：只做质量门禁，不构建镜像、不部署。
 #   · backend  ：mvn verify = 单元测试 + Testcontainers 集成测试 + JaCoCo 门禁
-#   · frontend ：vue-tsc 类型检查 + vite 构建 + Vitest 单测
-#   · e2e      ：Playwright（MySQL/Redis 容器 + 后端 + 前端，跑登录/主链路/权限）
+#   · frontend ：vue-tsc 类型检查 + vite 构建 + Vitest 单测（含 OpenAPI 契约静态校验）
+#   · e2e      ：Playwright（Chromium 全量 + Firefox/WebKit 冒烟）+ k6 性能冒烟
+#
+# 触发方式：
+#   · pull_request：PR 阶段提供反馈；
+#   · workflow_call：被 build-deploy 调用，作为部署的硬前置（同一 commit 只跑一次）。
 #
 # 为什么单独一个 workflow：
-#   build-deploy 只在 push main 时跑，PR 阶段没有测试反馈；
-#   把测试拆出来可以挂到 pull_request 上，且失败不会影响镜像构建链。
+#   把测试拆出来可以挂到 pull_request 上，且失败不会进入镜像构建链；
+#   push main 不再单独触发，统一由 build-deploy 调用，避免同一 commit 跑两遍。
 #
 # Testcontainers 在 GitHub ubuntu runner 上可直接使用（runner 自带 Docker），
 # 无需 service containers；MySQL/Redis 容器由测试代码自行拉起。
@@ -21,15 +25,12 @@ on:
     paths:
       - 'backend/**'
       - 'frontend/**'
+      - 'contracts/**'
       - 'settings.xml'
-      - '.github/workflows/test.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'backend/**'
-      - 'frontend/**'
-      - 'settings.xml'
-      - '.github/workflows/test.yml'
+      - '.github/workflows/**'
+  # 作为可复用工作流被 build-deploy 调用：push main 时由部署流水线统一触发，
+  # 避免同一 commit 跑两遍测试；测试通过才会进入镜像构建。
+  workflow_call:
   workflow_dispatch:
 
 # 同一分支的旧运行自动取消，避免排队浪费额度
@@ -96,16 +97,18 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: 上传前端覆盖率报告
+      - name: 上传前端测试与覆盖率报告
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: frontend-coverage
-          path: frontend/coverage
+          path: |
+            frontend/coverage
+            frontend/reports
           if-no-files-found: ignore
 
   e2e:
-    name: 端到端（Playwright）
+    name: 端到端 + 性能冒烟（Playwright + k6）
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -131,16 +134,22 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: 安装 Playwright Chromium
+      - name: 安装 Playwright 浏览器（Chromium / Firefox / WebKit）
         working-directory: frontend
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: 安装 k6
+        uses: grafana/setup-k6-action@v1
 
       # 一条命令拉起 MySQL/Redis（docker-compose.e2e.yml）+ 后端 18080 + 前端 5173，
+      # 先跑完整 Chromium 回归，再跑 Firefox/WebKit 冒烟，最后在同一环境执行 k6 阈值检查，
       # 跑完自动清理；失败时保留 Playwright 报告与 trace 供排查。
-      - name: 一键 E2E
+      - name: 一键 E2E + 性能冒烟
         working-directory: frontend
         env:
           E2E_VERBOSE: '1'
+          E2E_MULTI_BROWSER: '1'
+          PERF_SMOKE: '1'
         run: npm run test:e2e:local
 
       - name: 上传 E2E 报告
@@ -151,4 +160,37 @@ jobs:
           path: |
             frontend/playwright-report
             frontend/test-results
+            frontend/reports
+            frontend/perf/k6-summary.json
           if-no-files-found: ignore
+
+  summary:
+    name: 测试结果汇总
+    needs: [backend, frontend, e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 下载全部测试产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # 聚合 Surefire/Failsafe + Vitest JUnit + Playwright JSON + k6 summary，
+      # 同时写入 GitHub Step Summary，让每次流水线都能直接看到四层结果与 flaky 数。
+      - name: 生成质量摘要
+        run: node scripts/test-summary.mjs artifacts | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传质量摘要
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-summary
+          path: test-summary.md

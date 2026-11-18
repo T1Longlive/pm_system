@@ -20,6 +20,11 @@ export default defineConfig({
     },
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.spec.ts'],
+    // 默认控制台输出 + JUnit XML，供 CI 汇总与历史趋势使用
+    reporters: ['default', 'junit'],
+    outputFile: {
+      junit: './reports/unit-junit.xml'
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],

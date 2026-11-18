@@ -11,7 +11,8 @@
     "test:unit": "vitest",
     "test:unit:ci": "vitest run --coverage",
     "test:e2e": "playwright test",
-    "test:e2e:local": "node e2e/run-local.mjs"
+    "test:e2e:local": "node e2e/run-local.mjs",
+    "perf:smoke": "k6 run perf/smoke.js"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

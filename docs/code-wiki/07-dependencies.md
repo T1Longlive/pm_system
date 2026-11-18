@@ -108,13 +108,15 @@ constants/* ──► 被 views/components 引用（状态/工种/Bug 进度文�
 
 | 层 | 命令 | 说明 |
 |------|------|------|
-| 后端单元 + 架构 | `mvn test` | 不依赖外部资源；镜像构建执行这一层 |
+| 后端单元 + 架构 | `mvn test` | 不依赖外部资源；镜像构建执行这一层；含 `ApiContractTest` 路由契约校验 |
 | 后端集成 | `mvn verify` | Failsafe 执行 `*IT`，Testcontainers 启动 MySQL 8 / Redis 7；JaCoCo `check` 覆盖率门禁 |
-| 前端单元 | `npm run test:unit:ci` | Vitest + Vue Test Utils + v8 覆盖率 |
-| 前端 E2E | `npm run test:e2e:local` | Playwright；脚本自动起 `docker-compose.e2e.yml`（MySQL/Redis）+ 后端 18080 + 前端 5173，覆盖登录/守卫、主链路、强制改密、全局搜索、通知已读、日志筛选、需求表单创建、需求池加入月表、权限、排期格子与工期自动保存、乐观锁 409 冲突回滚、需求取消、Bug 逐格编辑持久化、管理端新增人员并登录、日历维护后排期灰显；连已有环境用 `E2E_BASE_URL=... npm run test:e2e`（未设置时自动跳过） |
-| CI | `.github/workflows/test.yml` | PR / main 触发：后端 `verify` + 前端单测与构建 |
+| 前端单元 | `npm run test:unit:ci` | Vitest + Vue Test Utils + v8 覆盖率；含 `contract.spec.ts` 前端接口契约静态校验 |
+| 接口契约 | 随上述单测执行 | 唯一事实来源 `contracts/openapi.json`：后端反射 Controller 路由双向比对，前端扫描 `src/api` 调用双向比对，E2E 再校验关键响应结构 |
+| 前端 E2E | `npm run test:e2e:local` | Playwright；脚本自动起 `docker-compose.e2e.yml`（MySQL/Redis）+ 后端 18080 + 前端 5173，覆盖登录/守卫、主链路、强制改密、全局搜索、通知已读、日志筛选、需求表单创建、需求池加入月表、权限、排期格子与工期自动保存、乐观锁 409 冲突回滚、需求取消、Bug 逐格编辑持久化、管理端新增人员并登录、日历维护后排期灰显、关键响应契约；默认 Chromium，`E2E_MULTI_BROWSER=1` 时额外对 `smoke.spec.ts` 跑 Firefox / WebKit；连已有环境用 `E2E_BASE_URL=... npm run test:e2e`（未设置时自动跳过） |
+| 性能冒烟 | `npm run perf:smoke` | k6：登录后打工作台/需求/月表/月视图，阈值 p95 < 800ms、失败率 < 1%、业务码全 200；可在 E2E 环境内用 `PERF_SMOKE=1` 自动执行 |
+| CI | `.github/workflows/test.yml` | PR 触发；`build-deploy.yml` 通过 `workflow_call` 复用为部署硬前置，测试失败不构建、不部署 |
 
-测试支撑：`AbstractIntegrationTest`（容器生命周期）、`Fixtures` / `TestDates`（造数）、`TestClock`（可拨动时间）、`MybatisPlusTestSupport`（纯单测的 Lambda 缓存初始化）。
+测试支撑：`AbstractIntegrationTest`（容器生命周期）、`Fixtures` / `TestDates`（造数）、`TestClock`（可拨动时间）、`MybatisPlusTestSupport`（纯单测的 Lambda 缓存初始化）、`contracts/openapi.json` + `ApiContractTest` / `contract.spec.ts` / `e2e/contract-validator.ts`（接口契约）、`perf/smoke.js`（k6 性能阈值）。
 
 覆盖率门禁：后端整体行覆盖 ≥80%；`RequirementStageServiceImpl` ≥80%、`ScheduleServiceImpl` ≥65%、`BugServiceImpl` ≥85%、`ProjectServiceImpl` ≥85%、`OperationLogServiceImpl` ≥75%、`NotificationServiceImpl` ≥90%、`FileServiceImpl` / `JwtInterceptor` ≥90%。
 

@@ -24,6 +24,10 @@ coverage/
 playwright-report/
 test-results/
 .playwright/
+.screenshots/
+reports/
+test-summary.md
+frontend/perf/k6-summary.json
 
 # 日志与本地环境
 logs/

@@ -16,7 +16,7 @@
  *   E2E_BASE_URL=http://host:8081 npx playwright test
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
@@ -97,6 +97,31 @@ function resolveMaven() {
   return existsSync(bundled) ? bundled : 'mvn'
 }
 
+/**
+ * 性能冒烟：优先用本机 k6；未安装时回退到 grafana/k6 容器（Docker 已是 E2E 前置）。
+ * 容器内通过 host.docker.internal 访问宿主机的 E2E 后端。
+ */
+function runPerfSmoke() {
+  const native = spawnSync('k6', ['version'], { stdio: 'ignore', shell: isWin })
+  if (!native.error && native.status === 0) {
+    return spawnSync('k6', [
+      'run', '--summary-export', 'perf/k6-summary.json', 'perf/smoke.js'
+    ], {
+      stdio: 'inherit',
+      shell: isWin,
+      cwd: frontendDir,
+      env: { ...process.env, BASE_URL: backendOrigin }
+    })
+  }
+  console.log('[e2e] 本机未安装 k6，回退到 grafana/k6 容器…')
+  return spawnSync('docker', [
+    'run', '--rm',
+    '-e', `BASE_URL=http://host.docker.internal:${backendPort}`,
+    '-v', `${path.join(frontendDir, 'perf')}:/perf`,
+    'grafana/k6', 'run', '--summary-export', '/perf/k6-summary.json', '/perf/smoke.js'
+  ], { stdio: 'inherit', shell: isWin })
+}
+
 const backendEnv = {
   ...process.env,
   SERVER_PORT: backendPort,
@@ -139,6 +164,7 @@ try {
   })
   await waitFor(`${baseUrl}/login`, '前端', 90_000)
 
+  mkdirSync(path.join(frontendDir, 'reports'), { recursive: true })
   console.log(`[e2e] 运行 Playwright（baseURL=${baseUrl}）…`)
   const playwright = spawnSync(isWin ? 'npx.cmd' : 'npx', ['playwright', 'test'], {
     stdio: 'inherit',
@@ -147,6 +173,18 @@ try {
     env: { ...process.env, E2E_BASE_URL: baseUrl }
   })
   exitCode = playwright.status ?? 1
+
+  // 性能冒烟：复用尚未销毁的 E2E 环境。CI 安装 k6 后通过 PERF_SMOKE=1 开启。
+  if (exitCode === 0 && process.env.PERF_SMOKE === '1') {
+    console.log('[e2e] 运行 k6 性能冒烟…')
+    const perf = runPerfSmoke()
+    if (perf.error) {
+      console.error('[e2e] k6（本机与 Docker）均不可用；安装 k6 或启动 Docker 后重试')
+      exitCode = 1
+    } else {
+      exitCode = perf.status ?? 1
+    }
+  }
 } catch (error) {
   console.error(`[e2e] ${error instanceof Error ? error.message : error}`)
 } finally {

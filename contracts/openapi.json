@@ -1,0 +1,1084 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "pm-system API contract",
+    "version": "1.0.0",
+    "description": "前后端共享接口契约：路径/方法必须与后端 Controller 和前端 api 模块双向一致；关键响应结构由 E2E 契约校验。"
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "operationId": "login",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultLogin"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/change-password": {
+      "post": {
+        "operationId": "changePassword",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/files/upload": {
+      "post": {
+        "operationId": "uploadFile",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/notifications": {
+      "get": {
+        "operationId": "listNotifications",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/notifications/unread-count": {
+      "get": {
+        "operationId": "unreadCount",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/notifications/read-all": {
+      "post": {
+        "operationId": "readAllNotifications",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/bugs": {
+      "get": {
+        "operationId": "listBugs",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultBugPage"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createBug",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/bugs/{id}": {
+      "put": {
+        "operationId": "updateBug",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteBug",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/bugs/{id}/archive": {
+      "post": {
+        "operationId": "archiveBug",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/bugs/{id}/reopen": {
+      "post": {
+        "operationId": "reopenBug",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/bugs/{id}/images": {
+      "post": {
+        "operationId": "addBugImages",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/bugs/{id}/images/{attachmentId}": {
+      "delete": {
+        "operationId": "deleteBugImage",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/reports/requirement-status": {
+      "get": {
+        "operationId": "requirementStatusReport",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/reports/workload": {
+      "get": {
+        "operationId": "workloadReport",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/reports/project-overview": {
+      "get": {
+        "operationId": "projectOverviewReport",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/operation-logs": {
+      "get": {
+        "operationId": "pageOperationLogs",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/operation-logs/operators": {
+      "get": {
+        "operationId": "listLogOperators",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/users": {
+      "get": {
+        "operationId": "listUsers",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createUser",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/users/{id}": {
+      "put": {
+        "operationId": "updateUser",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/users/{id}/reset-password": {
+      "post": {
+        "operationId": "resetPassword",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/users/{id}/status": {
+      "post": {
+        "operationId": "updateUserStatus",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/users/options": {
+      "get": {
+        "operationId": "userOptions",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/calendar": {
+      "get": {
+        "operationId": "getCalendar",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/calendar/{day}": {
+      "put": {
+        "operationId": "updateCalendarDay",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/schedule/months": {
+      "get": {
+        "operationId": "listScheduleMonths",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultScheduleMonthList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createScheduleMonth",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/schedule/months/{monthId}/view": {
+      "get": {
+        "operationId": "getScheduleMonthView",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultScheduleView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/schedule/months/{monthId}/requirements": {
+      "post": {
+        "operationId": "addRequirementToMonth",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/schedule/months/{monthId}/requirements/{requirementId}": {
+      "delete": {
+        "operationId": "removeRequirementFromMonth",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/schedule/rows/{rowId}": {
+      "put": {
+        "operationId": "saveScheduleRow",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/schedule/rows/{rowId}/to-next-month": {
+      "post": {
+        "operationId": "copyRequirementToNextMonth",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/schedule/incomplete": {
+      "get": {
+        "operationId": "listIncompleteRequirements",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/dashboard/summary": {
+      "get": {
+        "operationId": "dashboardSummary",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultDashboardSummary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dashboard/my-requirements": {
+      "get": {
+        "operationId": "myRequirements",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/requirements": {
+      "get": {
+        "operationId": "listRequirements",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultRequirementPage"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createRequirement",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/requirements/{id}": {
+      "get": {
+        "operationId": "getRequirement",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateRequirement",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/requirements/{id}/logs": {
+      "get": {
+        "operationId": "getRequirementLogs",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/requirements/{id}/cancel": {
+      "post": {
+        "operationId": "cancelRequirement",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/requirements/{id}/archive": {
+      "post": {
+        "operationId": "archiveRequirement",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/projects": {
+      "get": {
+        "operationId": "listProjects",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultProjectPage"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createProject",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}": {
+      "get": {
+        "operationId": "getProject",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateProject",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/members": {
+      "post": {
+        "operationId": "addProjectMember",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/members/{userId}": {
+      "delete": {
+        "operationId": "removeProjectMember",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "operationId": "search",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ResultLogin": {
+        "type": "object",
+        "required": ["code", "data"],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/LoginResult"
+          }
+        }
+      },
+      "LoginResult": {
+        "type": "object",
+        "required": [
+          "token",
+          "userId",
+          "username",
+          "realName",
+          "isAdmin",
+          "isPm",
+          "forceChangePwd"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "integer"
+          },
+          "username": {
+            "type": "string"
+          },
+          "realName": {
+            "type": "string"
+          },
+          "isAdmin": {
+            "type": "integer"
+          },
+          "isPm": {
+            "type": "integer"
+          },
+          "forceChangePwd": {
+            "type": "integer"
+          }
+        }
+      },
+      "ResultDashboardSummary": {
+        "type": "object",
+        "required": ["code", "data"],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/DashboardSummary"
+          }
+        }
+      },
+      "DashboardSummary": {
+        "type": "object",
+        "required": [
+          "unreadNotifications",
+          "myRequirementCount",
+          "monthEffort",
+          "openBugCount"
+        ],
+        "properties": {
+          "unreadNotifications": {
+            "type": "integer"
+          },
+          "myRequirementCount": {
+            "type": "integer"
+          },
+          "monthEffort": {
+            "type": "number"
+          },
+          "openBugCount": {
+            "type": "integer"
+          }
+        }
+      },
+      "ResultProjectPage": {
+        "type": "object",
+        "required": ["code", "data"],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/ProjectPage"
+          }
+        }
+      },
+      "ProjectPage": {
+        "type": "object",
+        "required": ["records", "total"],
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectItem"
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        }
+      },
+      "ProjectItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "code",
+          "name",
+          "creatorId",
+          "creatorName",
+          "memberCount",
+          "myRole"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "creatorId": {
+            "type": "integer"
+          },
+          "creatorName": {
+            "type": "string"
+          },
+          "memberCount": {
+            "type": "integer"
+          },
+          "myRole": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ResultRequirementPage": {
+        "type": "object",
+        "required": ["code", "data"],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/RequirementPage"
+          }
+        }
+      },
+      "RequirementPage": {
+        "type": "object",
+        "required": ["records", "total"],
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequirementItem"
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        }
+      },
+      "RequirementItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "reqNo",
+          "projectId",
+          "projectName",
+          "title",
+          "priority",
+          "status",
+          "updatedAt",
+          "participants",
+          "myRole"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "reqNo": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "integer"
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "integer"
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequirementParticipant"
+            }
+          },
+          "myRole": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RequirementParticipant": {
+        "type": "object",
+        "required": ["userId", "realName", "craft"],
+        "properties": {
+          "userId": {
+            "type": "integer"
+          },
+          "realName": {
+            "type": "string"
+          },
+          "craft": {
+            "type": "string"
+          }
+        }
+      },
+      "ResultScheduleMonthList": {
+        "type": "object",
+        "required": ["code", "data"],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduleMonth"
+            }
+          }
+        }
+      },
+      "ScheduleMonth": {
+        "type": "object",
+        "required": ["id", "year", "month"],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "year": {
+            "type": "integer"
+          },
+          "month": {
+            "type": "integer"
+          }
+        }
+      },
+      "ResultScheduleView": {
+        "type": "object",
+        "required": ["code", "data"],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/ScheduleView"
+          }
+        }
+      },
+      "ScheduleView": {
+        "type": "object",
+        "required": ["month", "days", "groups"],
+        "properties": {
+          "month": {
+            "$ref": "#/components/schemas/ScheduleMonth"
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CalendarDay"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduleGroup"
+            }
+          }
+        }
+      },
+      "CalendarDay": {
+        "type": "object",
+        "required": ["day", "type"],
+        "properties": {
+          "day": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ScheduleGroup": {
+        "type": "object",
+        "required": [
+          "seq",
+          "requirementId",
+          "reqNo",
+          "title",
+          "projectId",
+          "projectName",
+          "priority",
+          "reqStatus",
+          "rows"
+        ],
+        "properties": {
+          "seq": {
+            "type": "integer"
+          },
+          "requirementId": {
+            "type": "integer"
+          },
+          "reqNo": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "integer"
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "reqStatus": {
+            "type": "string"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduleRow"
+            }
+          }
+        }
+      },
+      "ScheduleRow": {
+        "type": "object",
+        "required": [
+          "rowId",
+          "craft",
+          "userId",
+          "realName",
+          "status",
+          "plannedEffort",
+          "scheduledSum",
+          "updatedAt",
+          "cells"
+        ],
+        "properties": {
+          "rowId": {
+            "type": "integer"
+          },
+          "craft": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "integer"
+          },
+          "realName": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "plannedEffort": {
+            "type": "number",
+            "nullable": true
+          },
+          "scheduledSum": {
+            "type": "number"
+          },
+          "updatedAt": {
+            "type": "integer"
+          },
+          "cells": {
+            "type": "object"
+          }
+        }
+      },
+      "ResultBugPage": {
+        "type": "object",
+        "required": ["code", "data"],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/BugPage"
+          }
+        }
+      },
+      "BugPage": {
+        "type": "object",
+        "required": ["records", "total"],
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BugItem"
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        }
+      },
+      "BugItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "bugNo",
+          "projectId",
+          "projectName",
+          "archived",
+          "images",
+          "myRole"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "bugNo": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "integer"
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "archived": {
+            "type": "integer"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BugImage"
+            }
+          },
+          "myRole": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "BugImage": {
+        "type": "object",
+        "required": ["url", "fileName"],
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "fileName": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
