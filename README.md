@@ -51,7 +51,7 @@ pm-system/
 
 ### 环境要求
 
-*   JDK 21+
+*   JDK 17+（与 `backend/pom.xml` 的 `<java.version>17</java.version>` 及 CI `setup-java` 一致）
 *   Node.js 18+
 *   MySQL 8.0+ (建议 root/123456，或根据配置修改)
 *   Redis (建议密码 123456)

@@ -41,10 +41,13 @@ COPY backend/src ./src
 #   （原命令带 -DskipTests，注释还写着"测试在 CI 的独立 job 里跑" —— 那个 job 从来不存在。）
 #
 # 🔴 前提：测试必须**不依赖 Spring 上下文 / 真实 MySQL / Redis**，
-#    否则云端构建机会失败。当前测试集合：
-#      · RequirementStageServiceImplTest —— 需求阶段派生（纯函数，核心业务规则）
-#      · JwtUtilTest                     —— JWT 签发/校验/防篡改（安全性质）
-#    原来的 PmApplicationTests 要真实数据库，已 @Disabled（见类注释）。
+#    否则云端构建机会失败。`mvn clean package` 由 Surefire 执行全部 *Test
+#    （当前 24 个类、约 137 个可执行 @Test）：含 Controller 切片（standalone
+#    MockMvc，不启容器）、Service 纯逻辑单测、JwtUtil 等性质测试、以及
+#    ArchitectureTest / ApiContractTest（架构守护与契约，静态可跑）。
+#    需要真实 MySQL/Redis 的集成测试是 *IT，绑定在 Failsafe 的 verify 阶段，
+#    不在本镜像构建的 package 阶段执行。PmApplicationTests 要真实数据库，
+#    已 @Disabled（见类注释）。
 RUN mvn -s ./settings.xml -B clean package
 
 # ---------- 阶段 2：运行 ----------
