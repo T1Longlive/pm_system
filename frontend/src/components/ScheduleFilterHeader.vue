@@ -63,18 +63,24 @@ const emit = defineEmits<{
   font-size: 11px;
   line-height: 1;
   color: #fff;
-  background: #2e7d32;
+  /* 未启用筛选：中性灰。只有该列真正应用了筛选条件（active）才显示绿色 */
+  background: #909399;
   border-radius: 2px;
   cursor: pointer;
 }
 
 .filter-trigger:hover {
-  background: #256b29;
+  background: #7d828a;
   color: #fff;
 }
 
 .filter-trigger.active {
-  background: #1b5e20;
+  background: #2e7d32;
+  color: #fff;
+}
+
+.filter-trigger.active:hover {
+  background: #256b29;
   color: #fff;
 }
 </style>
